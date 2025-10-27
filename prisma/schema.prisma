@@ -1,0 +1,164 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  user_id        Int      @id @default(autoincrement())
+  username       String   @unique
+  full_name      String?
+  email          String?  @unique
+  phone          String?  @unique
+  profile_pic    String?
+  status_message String?
+  verified       Boolean  @default(false)
+  is_online      Boolean  @default(false)
+  last_seen      DateTime?
+  created_at     DateTime @default(now())
+
+  messages        Message[]       @relation("userMessages")
+  auth            Auth?
+  otps            Otp[]
+  sessions        Session[]
+  chatMemberships ChatMember[]
+  messageStatus   MessageStatus[]
+  groupAdmin      GroupAdmin[]
+  notifications   Notification[]
+  blockedUsers    BlockedUser[]   @relation("blockedUsers")
+  blockedBy       BlockedUser[]   @relation("blockedByUsers")
+}
+
+model Auth {
+  auth_id       Int       @id @default(autoincrement())
+  user_id       Int       @unique
+  password_hash String
+  last_login    DateTime?
+  refresh_token String?   @db.Text
+  user User @relation(fields: [user_id], references: [user_id])
+}
+
+model Otp {
+  otp_id     Int      @id @default(autoincrement())
+  user_id    Int
+  otp_code   String
+  otp_type   String   // 'login', 'register', 'password_reset'
+  expires_at DateTime
+  verified   Boolean  @default(false)
+  created_at DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [user_id])
+
+  @@index([user_id, otp_type, verified])
+}
+
+
+model Chat {
+  chat_id    Int      @id @default(autoincrement())
+  chat_type  String // 'personal' or 'group'
+  chat_name  String?
+  chat_image String?
+  description String? @db.Text
+  created_by Int?
+  created_at DateTime @default(now())
+  private_chat_key String? @db.VarChar(64)
+
+  messages Message[]
+  members  ChatMember[]
+  admins   GroupAdmin[]
+
+  @@unique([chat_type, private_chat_key])
+}
+
+model ChatMember {
+  chat_id   Int
+  user_id   Int
+  joined_at DateTime @default(now())
+  role      String   @default("member")
+  chat Chat @relation(fields: [chat_id], references: [chat_id])
+  user User @relation(fields: [user_id], references: [user_id])
+
+  @@id([chat_id, user_id])
+}
+
+model Message {
+  message_id   Int      @id @default(autoincrement())
+  chat_id      Int
+  sender_id    Int
+  message_text String?
+  message_type String   @default("text")
+  created_at   DateTime @default(now())
+
+  chat        Chat            @relation(fields: [chat_id], references: [chat_id])
+  sender      User            @relation("userMessages", fields: [sender_id], references: [user_id])
+  status      MessageStatus[]
+  attachments Attachment[]
+}
+
+model MessageStatus {
+  message_id Int
+  user_id    Int
+  status     String   @default("sent")
+  updated_at DateTime @default(now())
+
+  message Message @relation(fields: [message_id], references: [message_id])
+  user    User    @relation(fields: [user_id], references: [user_id])
+
+  @@id([message_id, user_id])
+}
+
+model Attachment {
+  attachment_id Int      @id @default(autoincrement())
+  message_id    Int
+  file_url      String
+  file_type     String?
+  file_size     Int?
+  uploaded_at   DateTime @default(now())
+
+  message Message @relation(fields: [message_id], references: [message_id])
+}
+
+model GroupAdmin {
+  chat_id Int
+  user_id Int
+  role    String @default("admin")
+
+  chat Chat @relation(fields: [chat_id], references: [chat_id])
+  user User @relation(fields: [user_id], references: [user_id])
+
+  @@id([chat_id, user_id])
+}
+
+model Notification {
+  notification_id Int      @id @default(autoincrement())
+  user_id         Int
+  message         String
+  is_read         Boolean  @default(false)
+  created_at      DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [user_id])
+}
+
+model Session {
+  session_id  Int      @id @default(autoincrement())
+  user_id     Int
+  device_info String?
+  ip_address  String?
+  last_active DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [user_id])
+}
+
+model BlockedUser {
+  user_id         Int
+  blocked_user_id Int
+  blocked_at      DateTime @default(now())
+
+  user        User @relation("blockedUsers", fields: [user_id], references: [user_id])
+  blockedUser User @relation("blockedByUsers", fields: [blocked_user_id], references: [user_id])
+
+  @@id([user_id, blocked_user_id])
+}
