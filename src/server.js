@@ -5,7 +5,17 @@ const path = require('path');
 const { Server } = require('socket.io'); 
 const { initializeSocket } = require('./socket/socketHandler');
 const { testConnection } = require('./config/database');
-require('dotenv').config();
+
+// Load environment variables with explicit path
+const dotenv = require('dotenv');
+const envPath = path.join(__dirname, '..', '.env');
+const result = dotenv.config({ path: envPath });
+
+if (result.error) {
+  console.error('❌ Error loading .env file:', result.error);
+} else {
+  console.log(`✅ Loaded ${Object.keys(result.parsed || {}).length} environment variables from ${envPath}`);
+}
 
 // create express application
 const app = express();
@@ -92,6 +102,9 @@ const PORT = process.env.PORT || 3001;
 
 // Start server only after DB connection is confirmed
 async function startServer() {
+  const dbUrl = process.env.DATABASE_URL || 'Database URL not set';
+  console.log(`🔗 Attempting to connect to database at: ${dbUrl}`);
+
   const dbConnected = await testConnection();
   
   if (!dbConnected) {

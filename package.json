@@ -6,11 +6,13 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node src/server.js",
+    "start:prod": "NODE_ENV=production node src/server.js",
     "dev": "nodemon src/server.js",
     "test:api": "node test-api.js",
     "test:socket": "node test-socket.js",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
+    "db:push:prod": "dotenv -e .env.production -- prisma db push",
     "db:studio": "prisma studio",
     "db:seed": "node prisma/seed.js",
     "db:reset:seed": "npm run db:clear && npx prisma db push && npm run db:seed"
