@@ -33,16 +33,18 @@ const io = new Server(server, {
             // Log the origin for debugging
             console.log('🔍 Socket.IO CORS Origin:', origin);
             
-            // Allow localhost and trycloudflare domains
+            // Allow localhost, trycloudflare domains, and GitHub Pages
             const allowedOrigins = [
                 "http://localhost:3000",
                 "http://127.0.0.1:3000",
                 "https://localhost:3000",
-                "https://127.0.0.1:3000"
+                "https://127.0.0.1:3000",
+                "https://rushik8626.github.io"
             ];
             
-            // Allow if no origin (like Postman), or if in allowed list, or if it's a trycloudflare domain
-            if (!origin || allowedOrigins.includes(origin) || (origin && origin.includes('.trycloudflare.com'))) {
+            // Allow if no origin, or if in allowed list, or if it's a trycloudflare domain, or github.io
+            if (!origin || allowedOrigins.includes(origin) || 
+                (origin && (origin.includes('.trycloudflare.com') || origin.includes('.github.io')))) {
                 console.log('✅ Socket.IO CORS Allowed');
                 callback(null, true);
             } else {
@@ -63,16 +65,18 @@ app.use(cors({
         // Log the origin for debugging
         console.log('🔍 CORS Origin:', origin);
         
-        // Allow localhost and trycloudflare domains
+        // Allow localhost, trycloudflare domains, and GitHub Pages
         const allowedOrigins = [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
             "https://localhost:3000",
-            "https://127.0.0.1:3000"
+            "https://127.0.0.1:3000",
+            "https://rushik8626.github.io"
         ];
         
-        // Allow if no origin (like Postman), or if in allowed list, or if it's a trycloudflare domain
-        if (!origin || allowedOrigins.includes(origin) || (origin && origin.includes('.trycloudflare.com'))) {
+        // Allow if no origin, or if in allowed list, or if it's a trycloudflare domain, or github.io
+        if (!origin || allowedOrigins.includes(origin) || 
+            (origin && (origin.includes('.trycloudflare.com') || origin.includes('.github.io')))) {
             console.log('✅ CORS Allowed');
             callback(null, true);
         } else {
