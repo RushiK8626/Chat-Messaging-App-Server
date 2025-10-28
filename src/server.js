@@ -30,6 +30,9 @@ const io = new Server(server, {
     transports: ['websocket', 'polling'],
     cors: {
         origin: function (origin, callback) {
+            // Log the origin for debugging
+            console.log('🔍 Socket.IO CORS Origin:', origin);
+            
             // Allow localhost and trycloudflare domains
             const allowedOrigins = [
                 "http://localhost:3000",
@@ -40,8 +43,10 @@ const io = new Server(server, {
             
             // Allow if no origin (like Postman), or if in allowed list, or if it's a trycloudflare domain
             if (!origin || allowedOrigins.includes(origin) || (origin && origin.includes('.trycloudflare.com'))) {
+                console.log('✅ Socket.IO CORS Allowed');
                 callback(null, true);
             } else {
+                console.log('❌ Socket.IO CORS Blocked:', origin);
                 callback(new Error('Not allowed by CORS'));
             }
         },
@@ -55,6 +60,9 @@ const io = new Server(server, {
 const cors = require('cors');
 app.use(cors({
     origin: function (origin, callback) {
+        // Log the origin for debugging
+        console.log('🔍 CORS Origin:', origin);
+        
         // Allow localhost and trycloudflare domains
         const allowedOrigins = [
             "http://localhost:3000",
@@ -65,12 +73,18 @@ app.use(cors({
         
         // Allow if no origin (like Postman), or if in allowed list, or if it's a trycloudflare domain
         if (!origin || allowedOrigins.includes(origin) || (origin && origin.includes('.trycloudflare.com'))) {
+            console.log('✅ CORS Allowed');
             callback(null, true);
         } else {
+            console.log('❌ CORS Blocked:', origin);
             callback(new Error('Not allowed by CORS'));
         }
     },
-    credentials: true
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    exposedHeaders: ["Content-Range", "X-Content-Range"],
+    maxAge: 86400 // 24 hours
 }));
 
 // basic express middleware
