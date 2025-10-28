@@ -33,10 +33,13 @@ const io = new Server(server, {
             // Allow localhost and trycloudflare domains
             const allowedOrigins = [
                 "http://localhost:3000",
-                "http://127.0.0.1:3000"
+                "http://127.0.0.1:3000",
+                "https://localhost:3000",
+                "https://127.0.0.1:3000"
             ];
             
-            if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.trycloudflare.com')) {
+            // Allow if no origin (like Postman), or if in allowed list, or if it's a trycloudflare domain
+            if (!origin || allowedOrigins.includes(origin) || (origin && origin.includes('.trycloudflare.com'))) {
                 callback(null, true);
             } else {
                 callback(new Error('Not allowed by CORS'));
@@ -55,10 +58,13 @@ app.use(cors({
         // Allow localhost and trycloudflare domains
         const allowedOrigins = [
             "http://localhost:3000",
-            "http://127.0.0.1:3000"
+            "http://127.0.0.1:3000",
+            "https://localhost:3000",
+            "https://127.0.0.1:3000"
         ];
         
-        if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.trycloudflare.com')) {
+        // Allow if no origin (like Postman), or if in allowed list, or if it's a trycloudflare domain
+        if (!origin || allowedOrigins.includes(origin) || (origin && origin.includes('.trycloudflare.com'))) {
             callback(null, true);
         } else {
             callback(new Error('Not allowed by CORS'));
