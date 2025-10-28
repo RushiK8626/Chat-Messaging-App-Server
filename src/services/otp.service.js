@@ -29,6 +29,9 @@ const generateOTP = (length = 6) => {
   return otp;
 };
 
+// Export generateOTP for use in other modules
+exports.generateOTP = generateOTP;
+
 // Create and store OTP
 exports.createOTP = async (userId, otpType = 'login', txClient = null) => {
   try {

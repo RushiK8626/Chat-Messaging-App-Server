@@ -152,6 +152,8 @@ exports.getUserById = async (req, res) => {
   }
 };
 
+
+
 // Update user data
 exports.updateUser = async (req, res) => {
   try {

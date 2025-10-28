@@ -4,10 +4,35 @@ const prisma = new PrismaClient();
 const otpService = require('../services/otp.service');
 const jwtService = require('../services/jwt.service');
 
+// In-memory store for pending registrations (use Map with automatic cleanup)
+const pendingRegistrations = new Map(); // username -> { userData, otpCode, expiresAt, timeoutId }
+
+// In-memory store for pending login OTPs
+const pendingLogins = new Map(); // userId -> { otpCode, expiresAt, timeoutId, userData }
+
+// Cleanup expired registrations periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [username, data] of pendingRegistrations.entries()) {
+    if (data.expiresAt < now) {
+      pendingRegistrations.delete(username);
+      console.log(`⏰ Registration expired for username: ${username}`);
+    }
+  }
+  
+  // Cleanup expired login OTPs
+  for (const [userId, data] of pendingLogins.entries()) {
+    if (data.expiresAt < now) {
+      pendingLogins.delete(userId);
+      console.log(`⏰ Login OTP expired for userId: ${userId}`);
+    }
+  }
+}, 60000); // Check every minute
+
 exports.register = async (req, res) => {
   try {
     const { full_name, username, email, password, phone } = req.body;
-    
+
     // Validation
     if (!username || !password || (!email && !phone)) {
       return res.status(400).json({ error: 'Required fields missing' });
@@ -36,124 +61,229 @@ exports.register = async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create user (no transaction needed for OTP)
-    const user = await prisma.user.create({
-      data: {
-        username,
-        email,
-        phone,
-        full_name,
-        status_message: 'Hey there! I am using ConvoHub',
-        verified: false,
-        auth: { create: { password_hash: hashedPassword } }
-      }
+    const otpCode = otpService.generateOTP();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes from now
+
+    console.log('🔑 Generated OTP for registration:', {
+      username,
+      otpCode,
+      otpType: typeof otpCode,
+      expiresAt: new Date(expiresAt)
     });
-    
-    console.log("✅ Created new user:", user.user_id);
 
-    // Generate OTP (after user creation, so it persists even if email fails)
-    const { otpCode, expiresAt } = await otpService.createOTP(user.user_id, 'register');
-    console.log("✅ Generated OTP:", otpCode, "Expires:", expiresAt);
-    console.log("✅ Generated OTP:", otpCode, "Expires:", expiresAt);
+    // Set timeout to auto-delete after 5 minutes
+    const timeoutId = setTimeout(() => {
+      pendingRegistrations.delete(username);
+      console.log(`⏰ Registration auto-expired for username: ${username}`);
+    }, 5 * 60 * 1000);
 
-    // Try to send OTP
-    // If this fails, user and OTP are still in DB, user can use resend
-    try {
-      const sendResult = await otpService.sendOTP(user, otpCode, 'register');
-      console.log("✅ Successfully sent OTP");
-      
-      res.json({
-        message: 'OTP sent for registration',
-        userId: user.user_id,
-        username: user.username,
-        otpSentTo: sendResult.method,
-        destination: sendResult.method === 'console' 
-          ? 'Check terminal logs' 
-          : sendResult.destination,
-        expiresAt: expiresAt,
-        ...(process.env.NODE_ENV !== 'production' && { 
-          devOTP: otpCode
-        })
-      });
-      
-    } catch (otpError) {
-      console.error("⚠️ Failed to send OTP:", otpError.message);
-      
-      // User and OTP are created, but email failed
-      // Return OTP in dev mode so registration can continue
-      res.status(201).json({
-        message: 'User created but failed to send OTP. Please use resend OTP or check the OTP below.',
-        userId: user.user_id,
-        username: user.username,
-        requiresResend: true,
-        expiresAt: expiresAt,
-        ...(process.env.NODE_ENV !== 'production' && { 
-          devOTP: otpCode,
-          note: 'Use this OTP to verify your registration'
-        })
-      });
-    }
+    // Store user data in memory
+    pendingRegistrations.set(username, {
+      userData: { full_name, username, email, phone, password: hashedPassword },
+      otpCode,
+      expiresAt,
+      timeoutId
+    });
 
+    console.log(`📝 Pending registration created for: ${username}, OTP: ${otpCode}`);
+
+    await otpService.sendOTP({ email, phone }, otpCode, 'register');
+
+    res.status(200).json({ 
+      message: 'OTP sent. Please verify to complete registration.',
+      expiresIn: 300 // seconds
+    });
   } catch (error) {
-    console.error('❌ Registration error:', error);
-    
-    // Send appropriate error message
-    if (error.code === 'P2002') {
-      return res.status(409).json({ 
-        error: 'Username, email, or phone already exists'
-      });
-    }
-
-    res.status(500).json({ 
-      error: 'Registration failed. Please try again.',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Registration failed. Please try again.' });
   }
 };
-
 
 exports.verifyRegistrationOTP = async (req, res) => {
   try {
-    const { userId, username, otpCode } = req.body;
-    
-    if ((!userId && !username) || !otpCode) {
-      return res.status(400).json({ error: 'Username (or User ID) and OTP code are required' });
+    const { username, otpCode } = req.body;
+
+    console.log('🔍 OTP Verification Request:', { username, otpCode });
+
+    if (!username || !otpCode) {
+      return res.status(400).json({ error: 'Username and OTP code are required' });
     }
 
-    // Find user by username if username provided, otherwise use userId
-    let user;
-    if (username) {
-      user = await prisma.user.findUnique({
-        where: { username },
-        select: { user_id: true }
-      });
-      
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
+    const registrationData = pendingRegistrations.get(username);
+
+    if (!registrationData) {
+      console.log('❌ No pending registration found for username:', username);
+      return res.status(400).json({ error: 'OTP expired or invalid. Please register again.' });
     }
 
-    const userIdToVerify = username ? user.user_id : parseInt(userId);
-
-    const verification = await otpService.verifyOTP(userIdToVerify, otpCode, 'register');
-    
-    if (!verification.success) {
-      return res.status(400).json({ error: verification.message });
-    }
-
-    // Mark user as verified
-    await prisma.user.update({
-      where: { user_id: userIdToVerify },
-      data: { verified: true }
+    console.log('📝 Stored Registration Data:', {
+      username,
+      storedOTP: registrationData.otpCode,
+      enteredOTP: otpCode,
+      expiresAt: new Date(registrationData.expiresAt),
+      isExpired: registrationData.expiresAt < Date.now()
     });
 
-    res.json({ message: 'Registration verified successfully. You can now log in.' });
+    // Check if OTP expired
+    if (registrationData.expiresAt < Date.now()) {
+      pendingRegistrations.delete(username);
+      clearTimeout(registrationData.timeoutId);
+      console.log('⏰ OTP expired for username:', username);
+      return res.status(400).json({ error: 'OTP expired. Please register again.' });
+    }
+
+    // Compare OTPs (both as strings)
+    const storedOTP = String(registrationData.otpCode);
+    const enteredOTP = String(otpCode);
     
+    console.log('🔐 OTP Comparison:', {
+      storedOTP,
+      enteredOTP,
+      storedType: typeof registrationData.otpCode,
+      enteredType: typeof otpCode,
+      match: storedOTP === enteredOTP
+    });
+
+    if (storedOTP !== enteredOTP) {
+      console.log('❌ OTP mismatch!');
+      return res.status(400).json({ error: 'Invalid OTP. Please try again.' });
+    }
+
+    console.log('✅ OTP matched! Creating user...');
+
+    try {
+      const { userData } = registrationData;
+
+      // Create user in the database
+      const newUser = await prisma.user.create({
+        data: {
+          username: userData.username,
+          email: userData.email,
+          phone: userData.phone,
+          full_name: userData.full_name,
+          status_message: 'Hey there! I am using ConvoHub',
+          verified: true,
+          auth: { create: { password_hash: userData.password } },
+        },
+      });
+
+      // Clear timeout and remove from pending registrations
+      clearTimeout(registrationData.timeoutId);
+      pendingRegistrations.delete(username);
+
+      console.log(`✅ User ${username} registered successfully`);
+
+      res.status(201).json({ 
+        message: 'Registration successful.', 
+        user: {
+          user_id: newUser.user_id,
+          username: newUser.username,
+          email: newUser.email,
+          full_name: newUser.full_name
+        }
+      });
+    } catch (dbError) {
+      console.error('Database error during registration:', dbError);
+      return res.status(500).json({ error: 'Failed to create user. Please try again.' });
+    }
   } catch (error) {
     console.error('OTP verification error:', error);
-    res.status(500).json({ error: 'OTP verification failed' });
+    res.status(500).json({ error: 'OTP verification failed. Please try again.' });
   }
 };
+
+// Cancel registration if user leaves OTP verification page
+exports.cancelRegistration = async (req, res) => {
+  try {
+    const { username } = req.body;
+
+    if (!username) {
+      return res.status(400).json({ error: 'Username is required' });
+    }
+
+    const registrationData = pendingRegistrations.get(username);
+
+    if (registrationData) {
+      clearTimeout(registrationData.timeoutId);
+      pendingRegistrations.delete(username);
+      console.log(`✅ Registration canceled for username: ${username}`);
+      res.status(200).json({ message: 'Registration canceled successfully. You can register again.' });
+    } else {
+      // No pending registration found (already expired or completed)
+      res.status(404).json({ error: 'No pending registration found' });
+    }
+  } catch (error) {
+    console.error('Cancel registration error:', error);
+    res.status(500).json({ error: 'Failed to cancel registration' });
+  }
+};
+
+// Resend registration OTP (for users who didn't complete verification)
+exports.resendRegistrationOTP = async (req, res) => {
+  try {
+    const { username } = req.body;
+
+    if (!username) {
+      return res.status(400).json({ error: 'Username is required' });
+    }
+
+    const registrationData = pendingRegistrations.get(username);
+
+    if (!registrationData) {
+      return res.status(400).json({ 
+        error: 'No pending registration found. Please register again.' 
+      });
+    }
+
+    // Generate new OTP
+    const newOtpCode = otpService.generateOTP();
+    const newExpiresAt = Date.now() + 5 * 60 * 1000;
+
+    // Clear old timeout and set new one
+    clearTimeout(registrationData.timeoutId);
+    const newTimeoutId = setTimeout(() => {
+      pendingRegistrations.delete(username);
+      console.log(`⏰ Registration auto-expired for username: ${username}`);
+    }, 5 * 60 * 1000);
+
+    // Update with new OTP and expiry
+    registrationData.otpCode = newOtpCode;
+    registrationData.expiresAt = newExpiresAt;
+    registrationData.timeoutId = newTimeoutId;
+
+    try {
+      await otpService.sendOTP(
+        { 
+          email: registrationData.userData.email, 
+          phone: registrationData.userData.phone 
+        }, 
+        newOtpCode, 
+        'register'
+      );
+
+      console.log(`🔄 OTP resent for username: ${username}`);
+
+      res.status(200).json({ 
+        message: 'OTP resent successfully. Please check your email/phone.',
+        expiresIn: 300,
+        ...(process.env.NODE_ENV !== 'production' && { devOTP: newOtpCode })
+      });
+    } catch (sendError) {
+      console.error('Failed to resend OTP:', sendError);
+      res.status(500).json({ 
+        error: 'Failed to send OTP. Please try again.',
+        ...(process.env.NODE_ENV !== 'production' && { devOTP: newOtpCode })
+      });
+    }
+  } catch (error) {
+    console.error('Resend registration OTP error:', error);
+    res.status(500).json({ error: 'Failed to resend OTP' });
+  }
+};
+
+// Export the Maps for use in socket handler
+exports.getPendingRegistrations = () => pendingRegistrations;
+exports.getPendingLogins = () => pendingLogins;
 
 exports.login = async (req, res) => {
   try {
@@ -190,8 +320,38 @@ exports.login = async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Generate and send OTP
-    const { otpCode, expiresAt } = await otpService.createOTP(user.user_id, 'login');
+    // Generate OTP
+    const otpCode = otpService.generateOTP();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+
+    console.log('🔑 Generated OTP for login:', {
+      userId: user.user_id,
+      username: user.username,
+      otpCode,
+      otpType: typeof otpCode,
+      expiresAt: new Date(expiresAt)
+    });
+
+    // Set timeout to auto-delete after 5 minutes
+    const timeoutId = setTimeout(() => {
+      pendingLogins.delete(user.user_id);
+      console.log(`⏰ Login OTP auto-expired for userId: ${user.user_id}`);
+    }, 5 * 60 * 1000);
+
+    // Store OTP in memory
+    pendingLogins.set(user.user_id, {
+      otpCode,
+      expiresAt,
+      timeoutId,
+      userData: {
+        user_id: user.user_id,
+        username: user.username,
+        email: user.email,
+        phone: user.phone
+      }
+    });
+
+    console.log(`📝 Pending login OTP created for: ${user.username}, OTP: ${otpCode}`);
 
     // Send OTP
     try {
@@ -200,11 +360,12 @@ exports.login = async (req, res) => {
       res.json({
         message: 'OTP sent successfully',
         userId: user.user_id,
+        username: user.username,
         otpSentTo: sendResult.method,
         destination: sendResult.method === 'console' 
           ? 'Check terminal logs' 
           : sendResult.destination,
-        expiresAt,
+        expiresIn: 300,
         ...(process.env.NODE_ENV !== 'production' && { 
           devOTP: otpCode // Only in development
         })
@@ -212,7 +373,10 @@ exports.login = async (req, res) => {
     } catch (otpError) {
       console.error('Failed to send login OTP:', otpError);
       return res.status(500).json({ 
-        error: 'Failed to send verification code. Please try again.' 
+        error: 'Failed to send verification code. Please try again.',
+        ...(process.env.NODE_ENV !== 'production' && { 
+          devOTP: otpCode
+        })
       });
     }
 
@@ -226,14 +390,16 @@ exports.verifyLoginOTP = async (req, res) => {
   try {
     const { userId, username, otpCode } = req.body;
 
+    console.log('🔍 Login OTP Verification Request:', { userId, username, otpCode });
+
     if ((!userId && !username) || !otpCode) {
       return res.status(400).json({ error: 'Username (or User ID) and OTP code are required' });
     }
 
     // Find user by username if username provided, otherwise use userId
-    let user;
+    let userIdToVerify;
     if (username) {
-      user = await prisma.user.findUnique({
+      const user = await prisma.user.findUnique({
         where: { username },
         select: { user_id: true }
       });
@@ -241,16 +407,52 @@ exports.verifyLoginOTP = async (req, res) => {
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
+      userIdToVerify = user.user_id;
+    } else {
+      userIdToVerify = parseInt(userId);
     }
 
-    const userIdToVerify = username ? user.user_id : parseInt(userId);
+    const loginData = pendingLogins.get(userIdToVerify);
 
-    // Verify OTP
-    const verification = await otpService.verifyOTP(userIdToVerify, otpCode, 'login');
-
-    if (!verification.success) {
-      return res.status(400).json({ error: verification.message });
+    if (!loginData) {
+      console.log('❌ No pending login found for userId:', userIdToVerify);
+      return res.status(400).json({ error: 'OTP expired or invalid. Please login again.' });
     }
+
+    console.log('📝 Stored Login OTP Data:', {
+      userId: userIdToVerify,
+      storedOTP: loginData.otpCode,
+      enteredOTP: otpCode,
+      expiresAt: new Date(loginData.expiresAt),
+      isExpired: loginData.expiresAt < Date.now()
+    });
+
+    // Check if OTP expired
+    if (loginData.expiresAt < Date.now()) {
+      pendingLogins.delete(userIdToVerify);
+      clearTimeout(loginData.timeoutId);
+      console.log('⏰ Login OTP expired for userId:', userIdToVerify);
+      return res.status(400).json({ error: 'OTP expired. Please login again.' });
+    }
+
+    // Compare OTPs (both as strings)
+    const storedOTP = String(loginData.otpCode);
+    const enteredOTP = String(otpCode);
+    
+    console.log('🔐 Login OTP Comparison:', {
+      storedOTP,
+      enteredOTP,
+      storedType: typeof loginData.otpCode,
+      enteredType: typeof otpCode,
+      match: storedOTP === enteredOTP
+    });
+
+    if (storedOTP !== enteredOTP) {
+      console.log('❌ Login OTP mismatch!');
+      return res.status(400).json({ error: 'Invalid OTP. Please try again.' });
+    }
+
+    console.log('✅ Login OTP matched! Generating tokens...');
 
     // Get user details
     const userDetails = await prisma.user.findUnique({
@@ -283,6 +485,12 @@ exports.verifyLoginOTP = async (req, res) => {
       data: { last_login: new Date() }
     });
 
+    // Clear timeout and remove from pending logins
+    clearTimeout(loginData.timeoutId);
+    pendingLogins.delete(userIdToVerify);
+
+    console.log(`✅ User ${userDetails.username} logged in successfully`);
+
     res.json({
       message: 'Login successful',
       user: userDetails,
@@ -291,7 +499,7 @@ exports.verifyLoginOTP = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('OTP verification error:', error);
+    console.error('Login OTP verification error:', error);
     res.status(500).json({ error: 'OTP verification failed' });
   }
 };

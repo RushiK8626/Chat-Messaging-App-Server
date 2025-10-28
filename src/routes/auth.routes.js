@@ -11,6 +11,7 @@ router.post('/refresh-token', authController.refreshToken);
 router.post('/register', authController.register);
 router.post('/verify-registration-otp', authController.verifyRegistrationOTP);
 router.post('/resend-registration-otp', authController.resendRegistrationOTP);
+router.post('/cancel-registration', authController.cancelRegistration);
 
 // Protected routes (authentication required)
 router.post('/logout', verifyToken, authController.logout);

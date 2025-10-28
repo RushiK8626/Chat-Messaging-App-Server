@@ -6,13 +6,141 @@ const prisma = new PrismaClient();
 const activeUsers = new Map(); // userId -> { socketId, username, status }
 const userSockets = new Map(); // socketId -> userId
 
+// Store registration socket connections (username -> socketId)
+const registrationSockets = new Map();
+
+// Store login socket connections (userId -> socketId)
+const loginSockets = new Map();
+
 // Store io instance for use in helper functions
 let ioInstance = null;
 
 const initializeSocket = (io) => {
   ioInstance = io;
 
-  // Middleware to verify JWT token
+  // Create a separate namespace for registration (no auth required)
+  const registrationNamespace = io.of('/registration');
+  
+  registrationNamespace.on('connection', (socket) => {
+    console.log('Registration socket connected:', socket.id);
+
+    // Handle registration monitoring
+    socket.on('monitor_registration', (data) => {
+      const { username } = data;
+      if (username) {
+        registrationSockets.set(username, socket.id);
+        console.log(`👀 Monitoring registration for: ${username}`);
+        
+        socket.emit('monitoring_started', { username });
+      }
+    });
+
+    // Handle stop monitoring (explicit cancel from frontend)
+    socket.on('cancel_registration', async (data) => {
+      const { username } = data;
+      if (username) {
+        const authController = require('../controller/auth.controller');
+        const pendingRegistrations = authController.getPendingRegistrations();
+        
+        const registrationData = pendingRegistrations.get(username);
+        if (registrationData) {
+          clearTimeout(registrationData.timeoutId);
+          pendingRegistrations.delete(username);
+          console.log(`❌ Registration canceled via socket for: ${username}`);
+          
+          socket.emit('registration_cancelled', { username });
+        }
+        
+        registrationSockets.delete(username);
+      }
+    });
+
+    // Handle disconnection - auto-cancel registration
+    socket.on('disconnect', () => {
+      console.log('Registration socket disconnected:', socket.id);
+      
+      // Find and cancel any registration associated with this socket
+      for (const [username, socketId] of registrationSockets.entries()) {
+        if (socketId === socket.id) {
+          const authController = require('../controller/auth.controller');
+          const pendingRegistrations = authController.getPendingRegistrations();
+          
+          const registrationData = pendingRegistrations.get(username);
+          if (registrationData) {
+            clearTimeout(registrationData.timeoutId);
+            pendingRegistrations.delete(username);
+            console.log(`🔌 Registration auto-canceled on disconnect for: ${username}`);
+          }
+          
+          registrationSockets.delete(username);
+          break;
+        }
+      }
+    });
+  });
+
+  // Create a separate namespace for login OTP (no auth required)
+  const loginNamespace = io.of('/login');
+  
+  loginNamespace.on('connection', (socket) => {
+    console.log('Login socket connected:', socket.id);
+
+    // Handle login OTP monitoring
+    socket.on('monitor_login', (data) => {
+      const { userId } = data;
+      if (userId) {
+        loginSockets.set(parseInt(userId), socket.id);
+        console.log(`👀 Monitoring login OTP for userId: ${userId}`);
+        
+        socket.emit('monitoring_started', { userId });
+      }
+    });
+
+    // Handle stop monitoring (explicit cancel from frontend)
+    socket.on('cancel_login', async (data) => {
+      const { userId } = data;
+      if (userId) {
+        const authController = require('../controller/auth.controller');
+        const pendingLogins = authController.getPendingLogins();
+        
+        const loginData = pendingLogins.get(parseInt(userId));
+        if (loginData) {
+          clearTimeout(loginData.timeoutId);
+          pendingLogins.delete(parseInt(userId));
+          console.log(`❌ Login canceled via socket for userId: ${userId}`);
+          
+          socket.emit('login_cancelled', { userId });
+        }
+        
+        loginSockets.delete(parseInt(userId));
+      }
+    });
+
+    // Handle disconnection - auto-cancel login
+    socket.on('disconnect', () => {
+      console.log('Login socket disconnected:', socket.id);
+      
+      // Find and cancel any login associated with this socket
+      for (const [userId, socketId] of loginSockets.entries()) {
+        if (socketId === socket.id) {
+          const authController = require('../controller/auth.controller');
+          const pendingLogins = authController.getPendingLogins();
+          
+          const loginData = pendingLogins.get(userId);
+          if (loginData) {
+            clearTimeout(loginData.timeoutId);
+            pendingLogins.delete(userId);
+            console.log(`🔌 Login auto-canceled on disconnect for userId: ${userId}`);
+          }
+          
+          loginSockets.delete(userId);
+          break;
+        }
+      }
+    });
+  });
+
+  // Middleware to verify JWT token for main namespace
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.split(' ')[1];

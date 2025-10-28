@@ -29,7 +29,19 @@ const io = new Server(server, {
     path: '/socket.io/',
     transports: ['websocket', 'polling'],
     cors: {
-        origin: ["http://localhost:3000", "http://127.0.0.1:3000"],
+        origin: function (origin, callback) {
+            // Allow localhost and trycloudflare domains
+            const allowedOrigins = [
+                "http://localhost:3000",
+                "http://127.0.0.1:3000"
+            ];
+            
+            if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.trycloudflare.com')) {
+                callback(null, true);
+            } else {
+                callback(new Error('Not allowed by CORS'));
+            }
+        },
         methods: ["GET", "POST", "PUT", "DELETE"],
         allowedHeaders: ["Content-Type", "Authorization"],
         credentials: true
@@ -39,7 +51,19 @@ const io = new Server(server, {
 // Add CORS middleware for REST API
 const cors = require('cors');
 app.use(cors({
-    origin: ["http://localhost:3000", "http://127.0.0.1:3000"],
+    origin: function (origin, callback) {
+        // Allow localhost and trycloudflare domains
+        const allowedOrigins = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000"
+        ];
+        
+        if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.trycloudflare.com')) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     credentials: true
 }));
 
