@@ -1,5 +1,5 @@
 const mysql = require('mysql2');
-require('dotenv').config();
+require('dotenv').config( {path: '.env' });
 
 // Parse DATABASE_URL if provided, otherwise use individual variables
 let dbConfig;

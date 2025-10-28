@@ -8,7 +8,7 @@ const { testConnection } = require('./config/database');
 
 // Load environment variables based on NODE_ENV
 const dotenv = require('dotenv');
-const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env';
+const envFile = '.env';
 const envPath = path.join(__dirname, '..', envFile);
 const result = dotenv.config({ path: envPath });
 
