@@ -39,12 +39,14 @@ const io = new Server(server, {
                 "http://127.0.0.1:3000",
                 "https://localhost:3000",
                 "https://127.0.0.1:3000",
-                "https://rushik8626.github.io"
+                "https://rushik8626.github.io",
+                "https://convohub-kv2qalfll-rushikeshs-projects-0260b878.vercel.app",
+                "https://convohub-api.me"
             ];
             
-            // Allow if no origin, or if in allowed list, or if it's a trycloudflare domain, or github.io
+            // Allow if no origin, or if in allowed list, or if it's a trycloudflare domain, github.io, convohub-api.me, or Vercel-hosted frontend
             if (!origin || allowedOrigins.includes(origin) || 
-                (origin && (origin.includes('.trycloudflare.com') || origin.includes('.github.io')))) {
+                (origin && (origin.includes('.trycloudflare.com') || origin.includes('.github.io') || origin.includes('convohub-api.me') || origin.includes('vercel.app')))) {
                 console.log('✅ Socket.IO CORS Allowed');
                 callback(null, true);
             } else {
@@ -71,12 +73,14 @@ app.use(cors({
             "http://127.0.0.1:3000",
             "https://localhost:3000",
             "https://127.0.0.1:3000",
-            "https://rushik8626.github.io"
+            "https://rushik8626.github.io",
+            "https://convohub-kv2qalfll-rushikeshs-projects-0260b878.vercel.app",
+            "https://convohub-api.me"
         ];
         
-        // Allow if no origin, or if in allowed list, or if it's a trycloudflare domain, or github.io
+        // Allow if no origin, or if in allowed list, or if it's a trycloudflare domain, github.io, convohub-api.me, or Vercel-hosted frontend
         if (!origin || allowedOrigins.includes(origin) || 
-            (origin && (origin.includes('.trycloudflare.com') || origin.includes('.github.io')))) {
+            (origin && (origin.includes('.trycloudflare.com') || origin.includes('.github.io') || origin.includes('convohub-api.me') || origin.includes('vercel.app')))) {
             console.log('✅ CORS Allowed');
             callback(null, true);
         } else {

@@ -219,7 +219,9 @@ const initializeSocket = (io) => {
     // Join user to their chat rooms
     userChats.forEach(chatMember => {
       socket.join(`chat_${chatMember.chat_id}`);
+      console.log(`👥 User ${userId} joined room: chat_${chatMember.chat_id}`);
     });
+    console.log(`✅ User ${userId} joined ${userChats.length} chat rooms`);
 
     // Create/update user session
     await prisma.session.create({
@@ -357,6 +359,12 @@ const initializeSocket = (io) => {
 
         // Emit message to all users in the chat room (including sender)
         io.to(`chat_${chat_id}`).emit('new_message', messagePayload);
+        console.log(`📡 Broadcasting 'new_message' to room chat_${chat_id}`, {
+          message_id: message.message_id,
+          sender_id: sender_id,
+          chat_id: chat_id,
+          room_size: io.sockets.adapter.rooms.get(`chat_${chat_id}`)?.size || 0
+        });
 
         // Send specific confirmation to sender
         socket.emit('message_sent', {
