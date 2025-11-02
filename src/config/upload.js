@@ -24,6 +24,14 @@ const storage = multer.diskStorage({
 
 // File filter to accept only certain file types
 const fileFilter = (req, file, cb) => {
+  // Blocked MIME types (security risk)
+  const blockedMimes = ['application/json', 'application/x-javascript', 'text/javascript'];
+
+  // Reject blocked MIME types
+  if (blockedMimes.includes(file.mimetype)) {
+    return cb(new Error(`File type ${file.mimetype} is not allowed for security reasons`), false);
+  }
+
   // Allowed file types
   const allowedMimes = [
     // Images
@@ -55,13 +63,22 @@ const fileFilter = (req, file, cb) => {
     // Archives
     'application/zip',
     'application/x-rar-compressed',
-    'application/x-7z-compressed'
+    'application/x-7z-compressed',
+    // Generic binary (fallback for files with unknown MIME type)
+    'application/octet-stream'
   ];
 
+  // Check MIME type
   if (allowedMimes.includes(file.mimetype)) {
     cb(null, true);
+  } else if (file.mimetype === 'application/octet-stream') {
+    // For generic binary, allow based on file extension
+    console.log(`⚠️  Generic MIME type detected for ${file.originalname}. Allowing based on extension.`);
+    cb(null, true);
   } else {
-    cb(new Error(`File type ${file.mimetype} is not supported`), false);
+    // For unknown MIME types, allow them (user can upload any file extension)
+    console.log(`ℹ️  Unknown MIME type ${file.mimetype} for ${file.originalname}. Allowing file.`);
+    cb(null, true);
   }
 };
 

@@ -2,18 +2,19 @@ const express = require('express');
 const router = express.Router();
 const chatController = require('../controller/chat.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
+const { upload } = require('../config/upload');
 
 // All chat routes require authentication
 router.use(verifyToken);
 
 // Chat info
-router.get('/:id/info', chatController.getPublicChatInfo);
+router.get('/:id/info', chatController.getChatInfo);
 
 // Search chats (private by member name, group by chat name)
 router.get('/search', chatController.searchChats);
 
-// Chat CRUD operations
-router.post('/', chatController.createChat);
+// Chat CRUD operations - with file upload for group image
+router.post('/', upload.single('group_image'), chatController.createChat);
 router.get('/:id', chatController.getChatById);
 router.put('/:id', chatController.updateChat);
 router.delete('/:id', chatController.deleteChat);

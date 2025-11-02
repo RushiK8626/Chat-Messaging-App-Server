@@ -111,12 +111,13 @@ model MessageStatus {
 }
 
 model Attachment {
-  attachment_id Int      @id @default(autoincrement())
-  message_id    Int
-  file_url      String
-  file_type     String?
-  file_size     Int?
-  uploaded_at   DateTime @default(now())
+  attachment_id     Int      @id @default(autoincrement())
+  message_id        Int
+  file_url          String
+  original_filename String?  // Original name from sender's device
+  file_type         String?
+  file_size         Int?
+  uploaded_at       DateTime @default(now())
 
   message Message @relation(fields: [message_id], references: [message_id])
 }

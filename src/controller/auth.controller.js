@@ -1,3 +1,67 @@
+// In-memory store for pending password resets
+const pendingPasswordResets = new Map(); // userId -> { otpCode, expiresAt, timeoutId }
+
+// Request password reset (send OTP)
+exports.requestPasswordReset = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const otpCode = otpService.generateOTP();
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+    const timeoutId = setTimeout(() => {
+      pendingPasswordResets.delete(user.user_id);
+    }, 5 * 60 * 1000);
+    pendingPasswordResets.set(user.user_id, { otpCode, expiresAt, timeoutId });
+    // TODO: Send OTP via email (implement email sending logic here)
+    console.log(`🔑 Password reset OTP for ${email}:`, otpCode);
+    res.json({ 
+      user_id: user.user_id,
+      message: 'OTP sent to email if user exists' 
+    });
+  } catch (error) {
+    console.error('Password reset request error:', error);
+    res.status(500).json({ error: 'Password reset request failed' });
+  }
+};
+
+// Reset password using OTP
+exports.resetPassword = async (req, res) => {
+  try {
+    const { userId, otpCode, newPassword } = req.body;
+    if (!userId || !otpCode || !newPassword) {
+      return res.status(400).json({ error: 'userId, otpCode, and newPassword are required' });
+    }
+    const resetData = pendingPasswordResets.get(userId);
+    if (!resetData) {
+      return res.status(400).json({ error: 'OTP expired or invalid' });
+    }
+    if (resetData.expiresAt < Date.now()) {
+      pendingPasswordResets.delete(userId);
+      clearTimeout(resetData.timeoutId);
+      return res.status(400).json({ error: 'OTP expired' });
+    }
+    if (String(resetData.otpCode) !== String(otpCode)) {
+      return res.status(400).json({ error: 'Invalid OTP' });
+    }
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await prisma.auth.update({
+      where: { user_id: userId },
+      data: { password_hash: hashedPassword }
+    });
+    clearTimeout(resetData.timeoutId);
+    pendingPasswordResets.delete(userId);
+    res.json({ message: 'Password reset successful' });
+  } catch (error) {
+    console.error('Password reset error:', error);
+    res.status(500).json({ error: 'Password reset failed' });
+  }
+};
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcrypt');
 const prisma = new PrismaClient();
@@ -287,15 +351,20 @@ exports.getPendingLogins = () => pendingLogins;
 
 exports.login = async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, email, password } = req.body;
 
-    if (!username || !password) {
+    if ((!username && !email) || !password) {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
     // Find user
-    const user = await prisma.user.findUnique({
-      where: { username },
+    const user = await prisma.user.findFirst({
+      where: { 
+        OR: [
+          { username },
+          { email }
+        ]
+      },
       include: {
         auth: true
       }

@@ -69,19 +69,43 @@ const prisma = new PrismaClient();
 // Create a new chat (private or group)
 exports.createChat = async (req, res) => {
   try {
-    const { chat_type, chat_name, member_ids, admin_id } = req.body;
+    const { chat_type, chat_name, member_ids, admin_id, description } = req.body;
+    let groupImagePath = null;
+
+    // Handle group image upload
+    if (req.file) {
+      groupImagePath = `/uploads/${req.file.filename}`;
+      console.log(`📷 Group image uploaded: ${groupImagePath}`);
+    }
 
     // Validation
     if (!chat_type || !['private', 'group'].includes(chat_type)) {
       return res.status(400).json({ error: 'Invalid chat type. Must be "private" or "group"' });
     }
 
-    if (!member_ids || !Array.isArray(member_ids) || member_ids.length === 0) {
+    // Parse member_ids - can be array or JSON string
+    let parsedMemberIds = member_ids;
+
+    if (!member_ids) {
       return res.status(400).json({ error: 'member_ids array is required' });
     }
 
+    // If it's a string, parse it as JSON
+    if (typeof member_ids === 'string') {
+      try {
+        parsedMemberIds = JSON.parse(member_ids);
+      } catch (e) {
+        return res.status(400).json({ error: 'member_ids must be a valid JSON array string' });
+      }
+    }
+
+    // Validate it's an array and has elements
+    if (!Array.isArray(parsedMemberIds) || parsedMemberIds.length === 0) {
+      return res.status(400).json({ error: 'member_ids must be a non-empty array' });
+    }
+
     // Private chat must have exactly 2 members
-    if (chat_type === 'private' && member_ids.length !== 2) {
+    if (chat_type === 'private' && parsedMemberIds.length !== 2) {
       return res.status(400).json({ error: 'Private chat must have exactly 2 members' });
     }
 
@@ -96,16 +120,16 @@ exports.createChat = async (req, res) => {
     }
 
     // Check if admin is in member list
-    if (chat_type === 'group' && !member_ids.includes(admin_id)) {
+    if (chat_type === 'group' && !parsedMemberIds.includes(parseInt(admin_id))) {
       return res.status(400).json({ error: 'Admin must be a member of the group' });
     }
 
     // Verify all members exist
     const users = await prisma.user.findMany({
-      where: { user_id: { in: member_ids } }
+      where: { user_id: { in: parsedMemberIds.map(id => parseInt(id)) } }
     });
 
-    if (users.length !== member_ids.length) {
+    if (users.length !== parsedMemberIds.length) {
       return res.status(404).json({ error: 'One or more users not found' });
     }
 
@@ -113,7 +137,7 @@ exports.createChat = async (req, res) => {
     let privateChatKey = null;
     if (chat_type === 'private') {
       // Generate private_chat_key from sorted user IDs
-      const sortedIds = [...member_ids].sort((a, b) => a - b);
+      const sortedIds = [...parsedMemberIds].sort((a, b) => a - b);
       privateChatKey = sortedIds.join('_');
 
       const existingChat = await prisma.chat.findFirst({
@@ -145,22 +169,24 @@ exports.createChat = async (req, res) => {
       }
     }
 
-    // Create chat with members
+    // Create chat with members and optional group image
     const chat = await prisma.chat.create({
       data: {
         chat_type,
         chat_name: chat_type === 'group' ? chat_name : null,
+        description: chat_type === 'group' && description ? description : null,
+        chat_image: groupImagePath,
         private_chat_key: privateChatKey,
         members: {
-          create: member_ids.map(user_id => ({
-            user_id,
+          create: parsedMemberIds.map(user_id => ({
+            user_id: parseInt(user_id),
             joined_at: new Date()
           }))
         },
         ...(chat_type === 'group' && admin_id && {
           admins: {
             create: {
-              user_id: admin_id
+              user_id: parseInt(admin_id)
             }
           }
         })
@@ -538,7 +564,9 @@ exports.addChatMember = async (req, res) => {
             user_id: true,
             username: true,
             full_name: true,
-            profile_pic: true
+            profile_pic: true,
+            is_online: true,
+            last_seen: true
           }
         }
       }
@@ -630,7 +658,7 @@ exports.updateChat = async (req, res) => {
 };
 
 // Get public chat info (no authentication required)
-exports.getPublicChatInfo = async (req, res) => {
+exports.getChatInfo = async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -645,6 +673,18 @@ exports.getPublicChatInfo = async (req, res) => {
         created_at: true,
         _count: {
           select: { members: true }
+        },
+        members: {
+          include: {
+            user: {
+              select: {
+                user_id: true,
+                full_name: true,
+                username: true,
+                profile_pic: true
+              }
+            }
+          }
         }
       }
     });
@@ -669,7 +709,8 @@ exports.getPublicChatInfo = async (req, res) => {
       chat_image: chat.chat_image,
       description: chat.description,
       created_at: chat.created_at,
-      member_count: chat._count.members
+      member_count: chat._count.members,
+      members: chat.members.map(m => m.user)
     });
 
   } catch (error) {

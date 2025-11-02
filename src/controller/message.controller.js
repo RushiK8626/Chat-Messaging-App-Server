@@ -154,6 +154,7 @@ exports.uploadFileAndCreateMessage = async (req, res) => {
       data: {
         message_id: message.message_id,
         file_url: fileUrl,
+        original_filename: req.file.originalname,
         file_type: req.file.mimetype,
         file_size: req.file.size
       }
@@ -252,13 +253,12 @@ exports.getMessagesByChat = async (req, res) => {
               profile_pic: true
             }
           },
-          status: userId ? {
-            where: { user_id: userId }
-          } : true,
+          status: true, // Always include all statuses
           attachments: {
             select: {
               attachment_id: true,
               file_url: true,
+              original_filename: true,
               file_type: true,
               file_size: true
             }

@@ -28,6 +28,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
     path: '/socket.io/',
     transports: ['websocket', 'polling'],
+    maxHttpBufferSize: 100 * 1024 * 1024, // 100MB to support large file uploads
     cors: {
         origin: function (origin, callback) {
             // Log the origin for debugging
@@ -39,6 +40,10 @@ const io = new Server(server, {
                 "http://127.0.0.1:3000",
                 "https://localhost:3000",
                 "https://127.0.0.1:3000",
+                "http://localhost:3002",
+                "http://127.0.0.1:3002",
+                "https://localhost:3002",
+                "https://127.0.0.1:3002",
                 "https://rushik8626.github.io",
                 "https://convohub-kv2qalfll-rushikeshs-projects-0260b878.vercel.app",
                 "https://convohub-api.me"
@@ -73,6 +78,10 @@ app.use(cors({
             "http://127.0.0.1:3000",
             "https://localhost:3000",
             "https://127.0.0.1:3000",
+            "http://localhost:3002",
+            "http://127.0.0.1:3002",
+            "https://localhost:3002",
+            "https://127.0.0.1:3002",
             "https://rushik8626.github.io",
             "https://convohub-kv2qalfll-rushikeshs-projects-0260b878.vercel.app",
             "https://convohub-api.me"

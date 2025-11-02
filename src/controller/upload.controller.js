@@ -173,8 +173,8 @@ exports.getAttachment = async (req, res) => {
       return res.status(404).json({ error: 'File not found' });
     }
 
-    // Verify user has access to this file by checking message ownership
-    const message = await prisma.message.findFirst({
+    // Verify user has access to this file by checking attachment ownership
+    const attachment = await prisma.attachment.findFirst({
       where: {
         OR: [
           { file_url: `/uploads/${filename}` },
@@ -183,11 +183,15 @@ exports.getAttachment = async (req, res) => {
         ]
       },
       include: {
-        chat: {
+        message: {
           include: {
-            participants: {
-              where: {
-                user_id: req.user.user_id
+            chat: {
+              include: {
+                members: {
+                  where: {
+                    user_id: req.user.user_id
+                  }
+                }
               }
             }
           }
@@ -195,13 +199,13 @@ exports.getAttachment = async (req, res) => {
       }
     });
 
-    // If file is attached to a message, verify user is a participant of the chat
-    if (!message) {
+    // If file is attached to a message, verify user is a member of the chat
+    if (!attachment) {
       return res.status(404).json({ error: 'File not found in any accessible conversation' });
     }
 
-    if (message.chat.participants.length === 0) {
-      return res.status(403).json({ error: 'Access denied. You are not a participant of this conversation.' });
+    if (attachment.message.chat.members.length === 0) {
+      return res.status(403).json({ error: 'Access denied. You are not a member of this conversation.' });
     }
 
     // Serve the file
@@ -289,7 +293,7 @@ exports.getFile = async (req, res) => {
     }
 
     // Check if it's a message attachment
-    const message = await prisma.message.findFirst({
+    const attachment = await prisma.attachment.findFirst({
       where: {
         OR: [
           { file_url: `/uploads/${filename}` },
@@ -298,11 +302,15 @@ exports.getFile = async (req, res) => {
         ]
       },
       include: {
-        chat: {
+        message: {
           include: {
-            participants: {
-              where: {
-                user_id: req.user.user_id
+            chat: {
+              include: {
+                members: {
+                  where: {
+                    user_id: req.user.user_id
+                  }
+                }
               }
             }
           }
@@ -310,15 +318,11 @@ exports.getFile = async (req, res) => {
       }
     });
 
-    if (message) {
-      // Verify user is a participant
-      if (message.chat.participants.length === 0) {
-        return res.status(403).json({ error: 'Access denied' });
-      }
+    if (attachment && attachment.message.chat.members.length > 0) {
       return res.sendFile(filePath);
     }
 
-    // File not associated with any known entity
+    // File not associated with any known entity or user not authorized
     return res.status(404).json({ error: 'File not found' });
 
   } catch (error) {

@@ -1,6 +1,8 @@
 const { PrismaClient } = require('@prisma/client');
 const jwtService = require('../services/jwt.service');
 const prisma = new PrismaClient();
+const path = require('path');
+const fs = require('fs');
 
 // Store active users and their socket connections
 const activeUsers = new Map(); // userId -> { socketId, username, status }
@@ -14,6 +16,172 @@ const loginSockets = new Map();
 
 // Store io instance for use in helper functions
 let ioInstance = null;
+
+// Helper function to process complete file messages (used for both chunked and regular uploads)
+const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
+  try {
+    const { chat_id, message_text, fileBuffer, fileName, fileType, fileSize, tempId } = fileData;
+    const sender_id = userId;
+
+    console.log(`🔧 Processing complete file message: ${fileName} (${fileSize} bytes)`);
+
+    // Verify sender is a member of the chat
+    const chatMember = await prisma.chatMember.findUnique({
+      where: {
+        chat_id_user_id: {
+          chat_id: parseInt(chat_id),
+          user_id: userId
+        }
+      }
+    });
+
+    if (!chatMember) {
+      socket.emit('file_upload_error', { 
+        error: 'You are not a member of this chat',
+        tempId 
+      });
+      return;
+    }
+
+    // Create unique filename
+    const uploadsDir = path.join(__dirname, '../../uploads');
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(fileName);
+    const nameWithoutExt = path.basename(fileName, ext);
+    const serverFilename = nameWithoutExt + '-' + uniqueSuffix + ext;
+    const filePath = path.join(uploadsDir, serverFilename);
+
+    // Ensure uploads directory exists
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    // Write file to disk (convert base64 to buffer if needed)
+    let buffer = fileBuffer;
+    if (typeof fileBuffer === 'string') {
+      buffer = Buffer.from(fileBuffer, 'base64');
+    }
+    
+    try {
+      fs.writeFileSync(filePath, buffer);
+      console.log(`✅ File saved: ${serverFilename} at path: ${filePath}`);
+    } catch (writeErr) {
+      console.error(`❌ Failed to write file to disk:`, writeErr);
+      socket.emit('file_upload_error', { 
+        error: 'Failed to save file to disk',
+        details: writeErr.message,
+        tempId: tempId 
+      });
+      return;
+    }
+
+    // Determine message type based on file type
+    let messageType = 'file';
+    if (fileType.startsWith('image/')) {
+      messageType = 'image';
+    } else if (fileType.startsWith('video/')) {
+      messageType = 'video';
+    } else if (fileType.startsWith('audio/')) {
+      messageType = 'audio';
+    } else if (fileType.includes('pdf')) {
+      messageType = 'document';
+    }
+
+    // Create message record
+    const message = await prisma.message.create({
+      data: {
+        chat_id: parseInt(chat_id),
+        sender_id: sender_id,
+        message_text: message_text || fileName,
+        message_type: messageType
+      }
+    });
+
+    console.log(`✅ Message created: ${message.message_id}`);
+
+    // Create attachment record
+    const fileUrl = `/uploads/${serverFilename}`;
+    const attachment = await prisma.attachment.create({
+      data: {
+        message_id: message.message_id,
+        file_url: fileUrl,
+        original_filename: fileName,
+        file_type: fileType,
+        file_size: fileSize
+      }
+    });
+
+    console.log(`✅ Attachment created: ${attachment.attachment_id} with file_url: ${fileUrl}`);
+
+    // Create message status for all chat members
+    const chatMembers = await prisma.chatMember.findMany({
+      where: { chat_id: parseInt(chat_id) },
+      select: { user_id: true }
+    });
+
+    const statusData = chatMembers.map(member => ({
+      message_id: message.message_id,
+      user_id: member.user_id,
+      status: member.user_id === sender_id ? 'sent' : 'delivered'
+    }));
+
+    await prisma.messageStatus.createMany({
+      data: statusData
+    });
+
+    // Fetch complete message with relations
+    const completeMessage = await prisma.message.findUnique({
+      where: { message_id: message.message_id },
+      include: {
+        sender: {
+          select: {
+            user_id: true,
+            username: true,
+            full_name: true,
+            profile_pic: true
+          }
+        },
+        chat: {
+          select: {
+            chat_id: true,
+            chat_name: true,
+            chat_type: true
+          }
+        },
+        attachments: true,
+        status: true
+      }
+    });
+
+    console.log(`✅ Complete message fetched with ${completeMessage.attachments.length} attachment(s)`);
+
+    // Broadcast to all users in the chat room
+    io.to(`chat_${chat_id}`).emit('new_message', {
+      ...completeMessage,
+      tempId // Include temp ID for client matching
+    });
+
+    // Send confirmation to sender
+    socket.emit('file_upload_success', {
+      message_id: completeMessage.message_id,
+      tempId,
+      file_url: fileUrl,
+      original_filename: fileName,
+      status: 'sent',
+      timestamp: completeMessage.created_at
+    });
+
+    console.log(`✅ File message ${completeMessage.message_id} sent in chat ${chat_id} by user ${sender_id}`);
+
+  } catch (error) {
+    console.error('Error in _processCompleteFileMessage:', error);
+    socket.emit('file_upload_error', { 
+      error: 'Failed to process file',
+      details: error.message,
+      tempId: fileData.tempId 
+    });
+  }
+};
 
 const initializeSocket = (io) => {
   ioInstance = io;
@@ -259,25 +427,29 @@ const initializeSocket = (io) => {
 
     // ========== TEXT MESSAGE HANDLER ==========
     // Handle real-time text message sending
-    socket.on('send_message', async (messageData) => {
+    socket.on('send_message', async (messageData, ack) => {
       try {
-        const { chat_id, message_text, message_type = 'text', reply_to_id } = messageData;
+        const { chat_id, message_text, message_type = 'text', reply_to_id, tempId } = messageData;
         const sender_id = userId;
 
         // Validation
         if (!chat_id) {
-          socket.emit('message_error', { 
+          const errorData = { 
             error: 'chat_id is required',
-            tempId: messageData.tempId 
-          });
+            tempId
+          };
+          socket.emit('message_error', errorData);
+          if (typeof ack === 'function') ack({ success: false, error: 'chat_id is required' });
           return;
         }
 
         if (!message_text || message_text.trim() === '') {
-          socket.emit('message_error', { 
+          const errorData = { 
             error: 'message_text cannot be empty',
-            tempId: messageData.tempId 
-          });
+            tempId
+          };
+          socket.emit('message_error', errorData);
+          if (typeof ack === 'function') ack({ success: false, error: 'message_text cannot be empty' });
           return;
         }
 
@@ -292,10 +464,12 @@ const initializeSocket = (io) => {
         });
 
         if (!chatMember) {
-          socket.emit('message_error', { 
+          const errorData = { 
             error: 'You are not a member of this chat',
-            tempId: messageData.tempId 
-          });
+            tempId
+          };
+          socket.emit('message_error', errorData);
+          if (typeof ack === 'function') ack({ success: false, error: 'Not a chat member' });
           return;
         }
 
@@ -344,23 +518,37 @@ const initializeSocket = (io) => {
           data: statusData
         });
 
-        // Prepare message payload
-        const messagePayload = {
-          message_id: message.message_id,
-          chat_id: message.chat_id,
-          sender_id: message.sender_id,
-          message_text: message.message_text,
-          message_type: message.message_type,
-          created_at: message.created_at,
-          sender: message.sender,
-          chat: message.chat,
-          tempId: messageData.tempId // Send back temp ID for client matching
-        };
+        // Fetch complete message with status and attachments for broadcasting
+        const completeMessage = await prisma.message.findUnique({
+          where: { message_id: message.message_id },
+          include: {
+            sender: {
+              select: {
+                user_id: true,
+                username: true,
+                full_name: true,
+                profile_pic: true
+              }
+            },
+            chat: {
+              select: {
+                chat_id: true,
+                chat_name: true,
+                chat_type: true
+              }
+            },
+            status: true,
+            attachments: true
+          }
+        });
 
         // Emit message to all users in the chat room (including sender)
-        io.to(`chat_${chat_id}`).emit('new_message', messagePayload);
+        io.to(`chat_${chat_id}`).emit('new_message', {
+          ...completeMessage,
+          tempId: messageData.tempId // Send back temp ID for client matching
+        });
         console.log(`📡 Broadcasting 'new_message' to room chat_${chat_id}`, {
-          message_id: message.message_id,
+          message_id: completeMessage.message_id,
           sender_id: sender_id,
           chat_id: chat_id,
           room_size: io.sockets.adapter.rooms.get(`chat_${chat_id}`)?.size || 0
@@ -368,13 +556,22 @@ const initializeSocket = (io) => {
 
         // Send specific confirmation to sender
         socket.emit('message_sent', {
-          message_id: message.message_id,
+          message_id: completeMessage.message_id,
           tempId: messageData.tempId,
           status: 'sent',
-          timestamp: message.created_at
+          timestamp: completeMessage.created_at
         });
 
-        console.log(`✓ Message ${message.message_id} sent in chat ${chat_id} by user ${sender_id}`);
+        // Send acknowledgment callback to confirm persistence
+        if (typeof ack === 'function') {
+          ack({
+            success: true,
+            message_id: completeMessage.message_id,
+            tempId: messageData.tempId
+          });
+        }
+
+        console.log(`✓ Message ${completeMessage.message_id} sent in chat ${chat_id} by user ${sender_id}`);
 
       } catch (error) {
         console.error('Error in send_message:', error);
@@ -383,6 +580,7 @@ const initializeSocket = (io) => {
           details: error.message,
           tempId: messageData.tempId 
         });
+        if (typeof ack === 'function') ack({ success: false, error: error.message });
       }
     });
 
@@ -548,7 +746,160 @@ const initializeSocket = (io) => {
       socket.emit('online_users', onlineUsers);
     });
 
-    // Handle disconnection
+    // ========== FILE UPLOAD VIA WEBSOCKET ==========
+    // Handle file upload with attachment and message
+    socket.on('send_file_message', async (fileData, ack) => {
+      try {
+        const { chat_id, message_text, fileBuffer, fileName, fileType, fileSize, tempId } = fileData;
+
+        console.log(`📤 File upload started: ${fileName} (${fileSize} bytes) from user ${userId}`);
+
+        // Validation
+        if (!chat_id) {
+          socket.emit('file_upload_error', { 
+            error: 'chat_id is required',
+            tempId 
+          });
+          if (typeof ack === 'function') ack({ success: false, error: 'chat_id is required' });
+          return;
+        }
+
+        if (!fileBuffer || !fileName) {
+          socket.emit('file_upload_error', { 
+            error: 'File buffer and fileName are required',
+            tempId 
+          });
+          if (typeof ack === 'function') ack({ success: false, error: 'File buffer and fileName are required' });
+          return;
+        }
+
+        // Max file size: 50MB
+        const MAX_FILE_SIZE = 50 * 1024 * 1024;
+        if (fileSize > MAX_FILE_SIZE) {
+          socket.emit('file_upload_error', { 
+            error: `File size exceeds 50MB limit (${(fileSize / 1024 / 1024).toFixed(2)}MB)`,
+            tempId 
+          });
+          if (typeof ack === 'function') ack({ success: false, error: 'File size exceeds limit' });
+          return;
+        }
+
+        // Use helper function to process the file
+        await _processCompleteFileMessage(fileData, socket, io, userId);
+        
+        // Send acknowledgment callback to confirm persistence
+        if (typeof ack === 'function') {
+          ack({
+            success: true,
+            tempId
+          });
+        }
+
+      } catch (error) {
+        console.error('Error in send_file_message:', error);
+        socket.emit('file_upload_error', { 
+          error: 'Failed to upload file',
+          details: error.message,
+          tempId: fileData.tempId 
+        });
+        if (typeof ack === 'function') ack({ success: false, error: error.message });
+      }
+    });
+
+    // ========== CHUNKED FILE UPLOAD VIA WEBSOCKET ==========
+    // Store chunk data temporarily (in production, use Redis or database)
+    const fileChunks = new Map(); // tempId -> { chunks: [], metadata: {...} }
+
+    socket.on('send_file_message_chunk', async (chunkData, ack) => {
+      try {
+        const { 
+          tempId, 
+          chunkData: chunk, 
+          chunkIndex, 
+          totalChunks, 
+          isFirstChunk,
+          isLastChunk,
+          // First chunk includes metadata
+          chat_id,
+          fileName,
+          fileSize,
+          fileType,
+          message_text
+        } = chunkData;
+
+        console.log(`📦 Received chunk ${chunkIndex}/${totalChunks} for tempId: ${tempId}`);
+
+        // Initialize chunk storage on first chunk
+        if (isFirstChunk) {
+          fileChunks.set(tempId, {
+            chunks: [],
+            metadata: {
+              chat_id,
+              fileName,
+              fileSize,
+              fileType,
+              message_text,
+              userId: userId
+            },
+            receivedChunks: 0
+          });
+        }
+
+        // Store the chunk
+        const fileData = fileChunks.get(tempId);
+        if (fileData) {
+          fileData.chunks[chunkIndex] = chunk;
+          fileData.receivedChunks++;
+
+          // Send ack for this chunk
+          if (typeof ack === 'function') {
+            ack({ success: true, chunkIndex });
+          }
+
+          // If all chunks received, combine and process
+          if (isLastChunk && fileData.receivedChunks === totalChunks) {
+            console.log(`✅ All ${totalChunks} chunks received for tempId: ${tempId}`);
+            
+            // Combine all chunks
+            const completeBase64 = fileData.chunks.join('');
+            
+            // Process the complete file (same as regular file upload)
+            await _processCompleteFileMessage({
+              ...fileData.metadata,
+              fileBuffer: completeBase64,
+              tempId
+            }, socket, io, userId);
+            
+            // Clean up
+            fileChunks.delete(tempId);
+          }
+        } else {
+          console.error(`❌ No file data found for tempId: ${tempId}`);
+          if (typeof ack === 'function') {
+            ack({ success: false, error: 'File data not found' });
+          }
+        }
+      } catch (error) {
+        console.error('Error in send_file_message_chunk:', error);
+        if (typeof ack === 'function') {
+          ack({ success: false, error: error.message });
+        }
+      }
+    });
+
+    // ========== UPLOAD PROGRESS TRACKING (OPTIONAL) ==========
+    // Track upload progress for large files
+    socket.on('file_upload_progress', (progressData) => {
+      const { chat_id, progress, tempId } = progressData;
+      // Broadcast progress to sender only (or to all users in chat if desired)
+      socket.emit('file_upload_progress_update', {
+        progress, // 0-100
+        tempId
+      });
+      console.log(`📊 Upload progress: ${progress}% for tempId: ${tempId}`);
+    });
+
+    // ========== USER DISCONNECT ==========
     socket.on('disconnect', async () => {
       try {
         const userId = userSockets.get(socket.id);
