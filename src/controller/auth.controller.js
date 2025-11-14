@@ -18,7 +18,9 @@ exports.requestPasswordReset = async (req, res) => {
       pendingPasswordResets.delete(user.user_id);
     }, 5 * 60 * 1000);
     pendingPasswordResets.set(user.user_id, { otpCode, expiresAt, timeoutId });
-    // TODO: Send OTP via email (implement email sending logic here)
+    
+    await otpService.sendOTP({ email }, otpCode, 'forgot-password');
+
     console.log(`🔑 Password reset OTP for ${email}:`, otpCode);
     res.json({ 
       user_id: user.user_id,

@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const jwtService = require('../services/jwt.service');
+const notificationService = require('../services/notification.service');
 const prisma = new PrismaClient();
 const path = require('path');
 const fs = require('fs');
@@ -97,6 +98,21 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
       }
     });
 
+    // ✅ Auto-restore deleted chat when new message arrives
+    // If this chat was deleted (is_visible=false, is_archived=false), restore it
+    // BUT: Do NOT restore old messages - only the chat visibility
+    await prisma.chatVisibility.updateMany({
+      where: {
+        chat_id: parseInt(chat_id),
+        is_visible: false,
+        is_archived: false  // Only restore if deleted, not archived
+      },
+      data: {
+        is_visible: true,
+        hidden_at: null
+      }
+    });
+
     console.log(`✅ Message created: ${message.message_id}`);
 
     // Create attachment record
@@ -113,7 +129,7 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
 
     console.log(`✅ Attachment created: ${attachment.attachment_id} with file_url: ${fileUrl}`);
 
-    // Create message status for all chat members
+    // Create message status and visibility for all chat members
     const chatMembers = await prisma.chatMember.findMany({
       where: { chat_id: parseInt(chat_id) },
       select: { user_id: true }
@@ -127,6 +143,17 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
 
     await prisma.messageStatus.createMany({
       data: statusData
+    });
+
+    // Create message visibility for all members (default: visible)
+    const visibilityData = chatMembers.map(member => ({
+      message_id: message.message_id,
+      user_id: member.user_id,
+      is_visible: true
+    }));
+
+    await prisma.messageVisibility.createMany({
+      data: visibilityData
     });
 
     // Fetch complete message with relations
@@ -145,10 +172,19 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
           select: {
             chat_id: true,
             chat_name: true,
-            chat_type: true
+            chat_type: true,
+            chat_image: true
           }
         },
-        attachments: true,
+        attachments: {
+          select: {
+            attachment_id: true,
+            file_url: true,
+            original_filename: true,
+            file_type: true,
+            file_size: true
+          }
+        },
         status: true
       }
     });
@@ -160,6 +196,30 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
       ...completeMessage,
       tempId // Include temp ID for client matching
     });
+
+    // 📢 Send push notifications to recipients (exclude sender)
+    const fileMessageRecipientIds = chatMembers
+      .map(m => m.user_id)
+      .filter(id => id !== sender_id);
+
+    if (fileMessageRecipientIds.length > 0) {
+      try {
+        const fileInfo = completeMessage.attachments[0];
+        await notificationService.notifyNewMessage(
+          {
+            sender_username: completeMessage.sender.username,
+            sender_profile_pic: completeMessage.sender.profile_pic,
+            message_text: fileInfo?.original_filename || `Shared a ${messageType}`,
+            chat_id: parseInt(chat_id),
+            chat_name: completeMessage.chat.chat_name || completeMessage.sender.username,
+            message_type: messageType
+          },
+          fileMessageRecipientIds
+        );
+      } catch (pushError) {
+        console.error('❌ Failed to send push notifications:', pushError.message);
+      }
+    }
 
     // Send confirmation to sender
     socket.emit('file_upload_success', {
@@ -391,6 +451,13 @@ const initializeSocket = (io) => {
     });
     console.log(`✅ User ${userId} joined ${userChats.length} chat rooms`);
 
+    // ✅ Join user to their personal notification room for direct events
+    // This allows the user to receive direct notifications like:
+    // - you_were_added_to_group
+    // - you_were_removed_from_group
+    socket.join(`user_${userId}`);
+    console.log(`📬 User ${userId} joined personal notification room: user_${userId}`);
+
     // Create/update user session
     await prisma.session.create({
       data: {
@@ -474,14 +541,38 @@ const initializeSocket = (io) => {
         }
 
         // Create message in database
+        // Check if this is a reply
+        const messageDataToCreate = {
+          chat_id: parseInt(chat_id),
+          sender_id: parseInt(sender_id),
+          message_text: message_text.trim(),
+          message_type,
+          created_at: new Date()
+        };
+
+        // If reply_to_id is provided, mark as reply and set referenced message
+        if (reply_to_id) {
+          messageDataToCreate.is_reply = true;
+          messageDataToCreate.referenced_message_id = parseInt(reply_to_id);
+          
+          // Validate that the referenced message exists in the same chat
+          const referencedMsg = await prisma.message.findUnique({
+            where: { message_id: parseInt(reply_to_id) }
+          });
+
+          if (!referencedMsg || referencedMsg.chat_id !== parseInt(chat_id)) {
+            const errorData = { 
+              error: 'Referenced message not found or not in this chat',
+              tempId
+            };
+            socket.emit('message_error', errorData);
+            if (typeof ack === 'function') ack({ success: false, error: 'Invalid referenced message' });
+            return;
+          }
+        }
+
         const message = await prisma.message.create({
-          data: {
-            chat_id: parseInt(chat_id),
-            sender_id: parseInt(sender_id),
-            message_text: message_text.trim(),
-            message_type,
-            created_at: new Date()
-          },
+          data: messageDataToCreate,
           include: {
             sender: {
               select: {
@@ -497,15 +588,43 @@ const initializeSocket = (io) => {
                 chat_name: true,
                 chat_type: true
               }
+            },
+            referenced_message: {
+              select: {
+                message_id: true,
+                message_text: true,
+                sender: {
+                  select: {
+                    username: true,
+                    user_id: true
+                  }
+                }
+              }
             }
           }
         });
 
-        // Get all chat members for message status creation
+        // Get all chat members for message status and visibility creation
         const chatMembers = await prisma.chatMember.findMany({
           where: { chat_id: parseInt(chat_id) },
           select: { user_id: true }
         });
+
+        // ✅ Auto-restore deleted chat when new message arrives
+        // If this chat was deleted (is_visible=false, is_archived=false), restore it
+        // BUT: Do NOT restore old messages - only the chat visibility
+        await prisma.chatVisibility.updateMany({
+          where: {
+            chat_id: parseInt(chat_id),
+            is_visible: false,
+            is_archived: false  // Only restore if deleted, not archived
+          },
+          data: {
+            is_visible: true,
+            hidden_at: null
+          }
+        });
+        console.log(`✅ Auto-restored deleted chat ${chat_id} due to new message from user ${sender_id}`);
 
         // Create message status for all members
         const statusData = chatMembers.map(member => ({
@@ -516,6 +635,17 @@ const initializeSocket = (io) => {
 
         await prisma.messageStatus.createMany({
           data: statusData
+        });
+
+        // Create message visibility for all members (default: visible)
+        const visibilityData = chatMembers.map(member => ({
+          message_id: message.message_id,
+          user_id: member.user_id,
+          is_visible: true
+        }));
+
+        await prisma.messageVisibility.createMany({
+          data: visibilityData
         });
 
         // Fetch complete message with status and attachments for broadcasting
@@ -534,11 +664,34 @@ const initializeSocket = (io) => {
               select: {
                 chat_id: true,
                 chat_name: true,
-                chat_type: true
+                chat_type: true,
+                chat_image: true
               }
             },
             status: true,
-            attachments: true
+            attachments: {
+              select: {
+                attachment_id: true,
+                file_url: true,
+                original_filename: true,
+                file_type: true,
+                file_size: true
+              }
+            },
+            referenced_message: {
+              select: {
+                message_id: true,
+                message_text: true,
+                is_reply: true,
+                sender: {
+                  select: {
+                    user_id: true,
+                    username: true,
+                    full_name: true
+                  }
+                }
+              }
+            }
           }
         });
 
@@ -553,6 +706,30 @@ const initializeSocket = (io) => {
           chat_id: chat_id,
           room_size: io.sockets.adapter.rooms.get(`chat_${chat_id}`)?.size || 0
         });
+
+        // 📢 Send push notifications to recipients (exclude sender)
+        const recipientIds = chatMembers
+          .map(m => m.user_id)
+          .filter(id => id !== parseInt(sender_id));
+
+        if (recipientIds.length > 0) {
+          try {
+            await notificationService.notifyNewMessage(
+              {
+                sender_username: completeMessage.sender.username,
+                sender_profile_pic: completeMessage.sender.profile_pic,
+                message_text: completeMessage.message_text,
+                chat_id: parseInt(chat_id),
+                chat_name: completeMessage.chat.chat_name || completeMessage.sender.username,
+                message_type: completeMessage.message_type
+              },
+              recipientIds
+            );
+          } catch (pushError) {
+            console.error('❌ Failed to send push notifications:', pushError.message);
+            // Don't fail the message send, just log the error
+          }
+        }
 
         // Send specific confirmation to sender
         socket.emit('message_sent', {
@@ -601,11 +778,35 @@ const initializeSocket = (io) => {
           return;
         }
 
+        // Parse message_id as integer
+        const parsedMessageId = parseInt(message_id);
+        
+        if (isNaN(parsedMessageId)) {
+          socket.emit('status_error', { error: 'Invalid message_id format' });
+          return;
+        }
+
+        // Check if message exists and user has a status record
+        const existingStatus = await prisma.messageStatus.findUnique({
+          where: {
+            message_id_user_id: {
+              message_id: parsedMessageId,
+              user_id: userId
+            }
+          }
+        });
+
+        if (!existingStatus) {
+          console.warn(`❌ No message status found for message ${parsedMessageId} and user ${userId}`);
+          socket.emit('status_error', { error: 'Message status record not found' });
+          return;
+        }
+
         // Update message status
         const updatedStatus = await prisma.messageStatus.update({
           where: {
             message_id_user_id: {
-              message_id: parseInt(message_id),
+              message_id: parsedMessageId,
               user_id: userId
             }
           },
@@ -617,24 +818,263 @@ const initializeSocket = (io) => {
 
         // Get message to find chat_id
         const message = await prisma.message.findUnique({
-          where: { message_id: parseInt(message_id) },
+          where: { message_id: parsedMessageId },
           select: { chat_id: true, sender_id: true }
         });
 
+        if (!message) {
+          console.warn(`❌ Message not found: ${parsedMessageId}`);
+          socket.emit('status_error', { error: 'Message not found' });
+          return;
+        }
+
         // Broadcast status update to chat members
         io.to(`chat_${message.chat_id}`).emit('message_status_updated', {
-          message_id: parseInt(message_id),
+          message_id: parsedMessageId,
           user_id: userId,
           status: status,
           updated_at: updatedStatus.updated_at
         });
 
-        console.log(`✓ Message ${message_id} marked as ${status} by user ${userId}`);
+        console.log(`✓ Message ${parsedMessageId} marked as ${status} by user ${userId}`);
 
       } catch (error) {
         console.error('Error in update_message_status:', error);
         socket.emit('status_error', { 
           error: 'Failed to update message status',
+          details: error.message 
+        });
+      }
+    });
+
+    // ========== DELETE MESSAGE HANDLER ==========
+    // Handle message deletion for all members (sender or admin only)
+    socket.on('delete_message_for_all', async (data) => {
+      try {
+        const { message_id } = data;
+
+        // Validate message_id
+        if (!message_id) {
+          socket.emit('delete_error', { error: 'message_id is required' });
+          return;
+        }
+
+        const messageIdInt = parseInt(message_id);
+        if (isNaN(messageIdInt)) {
+          socket.emit('delete_error', { error: 'Invalid message_id format' });
+          return;
+        }
+
+        // Verify message exists
+        const message = await prisma.message.findUnique({
+          where: { message_id: messageIdInt },
+          include: { attachments: true }
+        });
+
+        if (!message) {
+          return socket.emit('delete_error', { error: 'Message not found' });
+        }
+
+        // Check if user is sender or group admin
+        const isSender = message.sender_id === userId;
+        
+        const isAdmin = await prisma.groupAdmin.findUnique({
+          where: {
+            chat_id_user_id: {
+              chat_id: message.chat_id,
+              user_id: userId
+            }
+          }
+        });
+
+        // Allow if sender OR admin
+        if (!isSender && !isAdmin) {
+          return socket.emit('delete_error', { 
+            error: 'Only message sender or group admin can delete this message'
+          });
+        }
+
+        // Delete file attachments from disk
+        if (message.attachments && message.attachments.length > 0) {
+          message.attachments.forEach(attachment => {
+            const filePath = path.join(__dirname, '../../', attachment.file_url);
+            if (fs.existsSync(filePath)) {
+              try {
+                fs.unlinkSync(filePath);
+                console.log(`🗑️  File deleted: ${filePath}`);
+              } catch (err) {
+                console.error('Error deleting file:', err);
+              }
+            }
+          });
+        }
+
+        // Delete related records (in correct order)
+        await prisma.messageVisibility.deleteMany({
+          where: { message_id: messageIdInt }
+        });
+
+        await prisma.messageStatus.deleteMany({
+          where: { message_id: messageIdInt }
+        });
+
+        await prisma.attachment.deleteMany({
+          where: { message_id: messageIdInt }
+        });
+
+        await prisma.message.delete({
+          where: { message_id: messageIdInt }
+        });
+
+        console.log(`🗑️  Message ${messageIdInt} deleted for all members by ${isSender ? 'sender' : 'admin'} (user ${userId})`);
+
+        // Broadcast deletion to all chat members
+        io.to(`chat_${message.chat_id}`).emit('message_deleted_for_all', {
+          message_id: messageIdInt,
+          chat_id: message.chat_id,
+          deleted_by_user_id: userId,
+          deleted_by_type: isSender ? 'sender' : 'admin',
+          deleted_at: new Date()
+        });
+
+        // Send confirmation to requester
+        socket.emit('delete_success', {
+          message: 'Message deleted successfully for all members',
+          message_id: messageIdInt,
+          deleted_by: isSender ? 'sender' : 'admin'
+        });
+
+      } catch (error) {
+        console.error('Error in delete_message_for_all:', error);
+        socket.emit('delete_error', { 
+          error: 'Failed to delete message',
+          details: error.message 
+        });
+      }
+    });
+
+    // ========== DELETE MESSAGE FOR USER HANDLER ==========
+    // Handle message deletion for current user only
+    socket.on('delete_message_for_user', async (data) => {
+      try {
+        const { message_id } = data;
+
+        // Validate message_id
+        if (!message_id) {
+          socket.emit('delete_error', { error: 'message_id is required' });
+          return;
+        }
+
+        const messageIdInt = parseInt(message_id);
+        if (isNaN(messageIdInt)) {
+          socket.emit('delete_error', { error: 'Invalid message_id format' });
+          return;
+        }
+
+        // Verify message exists
+        const message = await prisma.message.findUnique({
+          where: { message_id: messageIdInt },
+          select: { 
+            message_id: true,
+            chat_id: true,
+            sender_id: true
+          }
+        });
+
+        if (!message) {
+          return socket.emit('delete_error', { error: 'Message not found' });
+        }
+
+        // Check if user is a member of the chat
+        const isUserInChat = await prisma.chatMember.findUnique({
+          where: {
+            chat_id_user_id: {
+              chat_id: message.chat_id,
+              user_id: userId
+            }
+          }
+        });
+
+        if (!isUserInChat) {
+          return socket.emit('delete_error', { error: 'User is not a member of this chat' });
+        }
+
+        // Update message visibility for this user to false
+        const updatedVisibility = await prisma.messageVisibility.update({
+          where: {
+            message_id_user_id: {
+              message_id: messageIdInt,
+              user_id: userId
+            }
+          },
+          data: {
+            is_visible: false,
+            hidden_at: new Date()
+          }
+        });
+
+        // Check if message is hidden for all users
+        const visibleCount = await prisma.messageVisibility.count({
+          where: {
+            message_id: messageIdInt,
+            is_visible: true
+          }
+        });
+
+        // If hidden for all, delete message from database
+        if (visibleCount === 0) {
+          // Delete attachments
+          await prisma.attachment.deleteMany({
+            where: { message_id: messageIdInt }
+          });
+
+          // Delete message status
+          await prisma.messageStatus.deleteMany({
+            where: { message_id: messageIdInt }
+          });
+
+          // Delete visibility records
+          await prisma.messageVisibility.deleteMany({
+            where: { message_id: messageIdInt }
+          });
+
+          // Delete message
+          await prisma.message.delete({
+            where: { message_id: messageIdInt }
+          });
+
+          console.log(`🗑️  Message ${messageIdInt} removed from database (hidden for all members)`);
+
+          // Broadcast to all chat members that message is deleted
+          io.to(`chat_${message.chat_id}`).emit('message_deleted_for_all', {
+            message_id: messageIdInt,
+            chat_id: message.chat_id,
+            deleted_by_user_id: userId,
+            deleted_by_type: 'auto_cascade',
+            reason: 'Hidden for all members',
+            deleted_at: new Date()
+          });
+
+          return socket.emit('delete_success', {
+            message: 'Message deleted for user and removed from database (hidden for all members)',
+            message_id: messageIdInt,
+            removed_from_db: true
+          });
+        }
+
+        console.log(`✓ Message ${messageIdInt} deleted for user ${userId}`);
+
+        // Notify only the requesting user (personal deletion)
+        socket.emit('delete_success', {
+          message: 'Message deleted for you',
+          message_id: messageIdInt,
+          removed_from_db: false
+        });
+
+      } catch (error) {
+        console.error('Error in delete_message_for_user:', error);
+        socket.emit('delete_error', { 
+          error: 'Failed to delete message for user',
           details: error.message 
         });
       }
@@ -661,26 +1101,38 @@ const initializeSocket = (io) => {
     // Handle joining a specific chat
     socket.on('join_chat', async (data) => {
       try {
-        const { chat_id, user_id } = data;
+        const { chat_id } = data;
+
+        // Validate chat_id
+        if (!chat_id) {
+          socket.emit('error', { message: 'chat_id is required' });
+          return;
+        }
+
+        const chatIdInt = parseInt(chat_id);
+        if (isNaN(chatIdInt)) {
+          socket.emit('error', { message: 'Invalid chat_id format' });
+          return;
+        }
 
         // Verify user is a member of the chat
         const chatMember = await prisma.chatMember.findUnique({
           where: {
             chat_id_user_id: {
-              chat_id: parseInt(chat_id),
-              user_id: parseInt(user_id)
+              chat_id: chatIdInt,
+              user_id: userId
             }
           }
         });
 
         if (chatMember) {
-          socket.join(`chat_${chat_id}`);
-          socket.emit('chat_joined', { chat_id });
+          socket.join(`chat_${chatIdInt}`);
+          socket.emit('chat_joined', { chat_id: chatIdInt });
           
           // Notify others in the chat
-          socket.to(`chat_${chat_id}`).emit('user_joined_chat', {
-            user_id,
-            chat_id
+          socket.to(`chat_${chatIdInt}`).emit('user_joined_chat', {
+            user_id: userId,
+            chat_id: chatIdInt
           });
         } else {
           socket.emit('error', { message: 'Not authorized to join this chat' });
@@ -694,10 +1146,10 @@ const initializeSocket = (io) => {
 
     // Handle leaving a chat
     socket.on('leave_chat', (data) => {
-      const { chat_id, user_id } = data;
+      const { chat_id } = data;
       socket.leave(`chat_${chat_id}`);
       socket.to(`chat_${chat_id}`).emit('user_left_chat', {
-        user_id,
+        user_id: userId,
         chat_id
       });
     });
@@ -705,24 +1157,24 @@ const initializeSocket = (io) => {
     // Handle user status updates
     socket.on('update_status', async (data) => {
       try {
-        const { user_id, status_message } = data;
+        const { status_message } = data;
         
         // Update status in database
         await prisma.user.update({
-          where: { user_id: parseInt(user_id) },
+          where: { user_id: userId },
           data: { status_message }
         });
 
         // Update in active users
-        if (activeUsers.has(parseInt(user_id))) {
-          const userData = activeUsers.get(parseInt(user_id));
+        if (activeUsers.has(userId)) {
+          const userData = activeUsers.get(userId);
           userData.status_message = status_message;
-          activeUsers.set(parseInt(user_id), userData);
+          activeUsers.set(userId, userData);
         }
 
         // Broadcast status update
         socket.broadcast.emit('user_status_updated', {
-          user_id: parseInt(user_id),
+          user_id: userId,
           status_message
         });
 
@@ -908,41 +1360,59 @@ const initializeSocket = (io) => {
           // Update last seen time
           const userData = activeUsers.get(userId);
           if (userData) {
-            // Update user offline status in database
-            await prisma.user.update({
-              where: { user_id: userId },
-              data: {
-                is_online: false,
-                last_seen: new Date()
+            // Update user offline status in database with retry logic and timeout
+            try {
+              await Promise.race([
+                prisma.user.update({
+                  where: { user_id: userId },
+                  data: {
+                    is_online: false,
+                    last_seen: new Date()
+                  }
+                }),
+                new Promise((_, reject) =>
+                  setTimeout(() => reject(new Error('Update timeout')), 5000)
+                )
+              ]);
+
+              // Update session last activity (non-critical, don't wait)
+              prisma.session.updateMany({
+                where: { user_id: userId },
+                data: { last_active: new Date() }
+              }).catch(err => {
+                console.warn(`⚠️  Failed to update session for user ${userId}:`, err.message);
+              });
+
+              // Notify others that user is offline (fire and forget)
+              socket.broadcast.emit('user_offline', {
+                user_id: userId,
+                username: userData.username,
+                lastSeen: new Date()
+              });
+
+              console.log(`✅ User ${userData.username} (${userId}) disconnected`);
+            } catch (dbError) {
+              if (dbError.message === 'Update timeout') {
+                console.warn(`⚠️  Database update timeout for user ${userId}, skipping`);
+              } else if (dbError.code === 'HY000') {
+                console.warn(`⚠️  Database lock timeout for user ${userId}, skipping offline update`);
+              } else {
+                console.error(`❌ Error updating user ${userId} status:`, dbError.message);
               }
-            });
-
-            // Update session last activity
-            await prisma.session.updateMany({
-              where: { user_id: userId },
-              data: { last_active: new Date() }
-            });
-
-            // Notify others that user is offline
-            socket.broadcast.emit('user_offline', {
-              user_id: userId,
-              username: userData.username,
-              lastSeen: new Date()
-            });
-
-            console.log(`User ${userData.username} (${userId}) disconnected`);
+              // Don't throw - cleanup will continue regardless
+            }
           }
 
-          // Clean up
+          // Clean up immediately (don't wait for DB)
           activeUsers.delete(userId);
           userSockets.delete(socket.id);
         }
 
       } catch (error) {
-        console.error('Error in disconnect:', error);
+        console.error('❌ Error in disconnect handler:', error.message);
       }
 
-      console.log('User disconnected:', socket.id);
+      console.log(`🔌 Socket disconnected: ${socket.id}`);
     });
 
     // Handle errors

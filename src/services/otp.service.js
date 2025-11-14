@@ -81,13 +81,21 @@ exports.sendOTPEmail = async (email, otpCode, otpType) => {
       }
     });
 
-    const subject = otpType === 'register' 
+    let subject = otpType === 'register' 
       ? 'Welcome to ConvoHub - Verify Your Account' 
       : 'ConvoHub Login Verification';
 
-    const message = otpType === 'register'
-      ? `Welcome to ConvoHub! Your verification code is: ${otpCode}`
-      : `Your ConvoHub login verification code is: ${otpCode}`;
+    subject = otpType === 'login'
+      ? 'ConvoHub Login Verification'
+      : 'ConvoHub Password Reset';
+
+    let message = otpType === 'register'
+      ? `Welcome to ConvoHub! Your verification code is:`
+      : `Your ConvoHub login verification code is:`;
+
+    message = otpType === 'login'
+      ? `Your ConvoHub login verification code is:`
+      : `Your ConvoHub password reset OTP is:`;
 
     await transporter.sendMail({
       from: process.env.EMAIL_USER,

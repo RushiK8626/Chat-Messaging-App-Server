@@ -99,7 +99,7 @@ app.use(cors({
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Cache-Control", "Pragma", "Expires"],
     exposedHeaders: ["Content-Range", "X-Content-Range"],
     maxAge: 86400 // 24 hours
 }));
@@ -124,6 +124,7 @@ app.get('/', (req, res) => {
             users: '/api/users',
             messages: '/api/messages',
             chats: '/api/chats',
+            notifications: '/api/notifications',
             health: '/health',
             socket: '/socket.io/ (WebSocket only - use browser or Socket.IO client)'
         }
@@ -136,11 +137,19 @@ const messageRoutes = require('./routes/message.routes');
 const chatRoutes = require('./routes/chat.routes');
 const authRoutes = require('./routes/auth.routes');
 const uploadRoutes = require('./routes/upload.routes');
+const chatVisibilityRoutes = require('./routes/chatVisibility.routes');
+const notificationRoutes = require('./routes/notification.routes');
 
 // Use routes
 app.use('/api/users', userRoutes);
 app.use('/api/messages', messageRoutes);
-app.use('/api/chats', chatRoutes);
+// Pass io instance to chat routes via middleware
+app.use('/api/chats', (req, res, next) => {
+  req.io = io;
+  next();
+}, chatRoutes);
+app.use('/api/chat-visibility', chatVisibilityRoutes);
+app.use('/api/notifications', notificationRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/uploads', uploadRoutes); // Secure file serving
 

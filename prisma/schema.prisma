@@ -20,16 +20,19 @@ model User {
   last_seen      DateTime?
   created_at     DateTime @default(now())
 
-  messages        Message[]       @relation("userMessages")
-  auth            Auth?
-  otps            Otp[]
-  sessions        Session[]
-  chatMemberships ChatMember[]
-  messageStatus   MessageStatus[]
-  groupAdmin      GroupAdmin[]
-  notifications   Notification[]
-  blockedUsers    BlockedUser[]   @relation("blockedUsers")
-  blockedBy       BlockedUser[]   @relation("blockedByUsers")
+  messages           Message[]       @relation("userMessages")
+  auth               Auth?
+  otps               Otp[]
+  sessions           Session[]
+  chatMemberships    ChatMember[]
+  messageStatus      MessageStatus[]
+  groupAdmin         GroupAdmin[]
+  notifications      Notification[]
+  messageVisibility  MessageVisibility[]
+  chatVisibility     ChatVisibility[]
+  blockedUsers       BlockedUser[]   @relation("blockedUsers")
+  blockedBy          BlockedUser[]   @relation("blockedByUsers")
+  pushSubscription   PushSubscription?
 }
 
 model Auth {
@@ -69,6 +72,7 @@ model Chat {
   messages Message[]
   members  ChatMember[]
   admins   GroupAdmin[]
+  chatVisibility ChatVisibility[]
 
   @@unique([chat_type, private_chat_key])
 }
@@ -88,14 +92,20 @@ model Message {
   message_id   Int      @id @default(autoincrement())
   chat_id      Int
   sender_id    Int
-  message_text String?
+  message_text String? @db.LongText
   message_type String   @default("text")
   created_at   DateTime @default(now())
+  is_reply     Boolean @default(false)
+  is_forward   Boolean @default(false)
+  referenced_message_id  Int?
 
-  chat        Chat            @relation(fields: [chat_id], references: [chat_id])
-  sender      User            @relation("userMessages", fields: [sender_id], references: [user_id])
-  status      MessageStatus[]
-  attachments Attachment[]
+  chat           Chat                @relation(fields: [chat_id], references: [chat_id])
+  sender         User                @relation("userMessages", fields: [sender_id], references: [user_id])
+  referenced_message   Message?      @relation("MessageReference", fields: [referenced_message_id], references: [message_id])
+  replies        Message[]           @relation("MessageReference")
+  status         MessageStatus[]
+  attachments    Attachment[]
+  visibility     MessageVisibility[]
 }
 
 model MessageStatus {
@@ -108,6 +118,33 @@ model MessageStatus {
   user    User    @relation(fields: [user_id], references: [user_id])
 
   @@id([message_id, user_id])
+}
+
+model MessageVisibility {
+  message_id Int
+  user_id    Int
+  is_visible Boolean  @default(true)
+  hidden_at  DateTime?
+
+  message Message @relation(fields: [message_id], references: [message_id])
+  user    User    @relation(fields: [user_id], references: [user_id])
+
+  @@id([message_id, user_id])
+}
+
+model ChatVisibility {
+  chat_id    Int
+  user_id    Int
+  is_visible Boolean  @default(true)
+  is_archived Boolean @default(false)
+  hidden_at  DateTime?
+  archived_at DateTime?
+  pinned     Boolean  @default(false)
+
+  chat Chat @relation(fields: [chat_id], references: [chat_id], onDelete: Cascade)
+  user User @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@id([chat_id, user_id])
 }
 
 model Attachment {
@@ -137,10 +174,27 @@ model Notification {
   notification_id Int      @id @default(autoincrement())
   user_id         Int
   message         String
+  notification_type String? // 'message', 'group', 'mention', etc.
+  action_url      String?
   is_read         Boolean  @default(false)
+  read_at         DateTime?
   created_at      DateTime @default(now())
 
   user User @relation(fields: [user_id], references: [user_id])
+}
+
+model PushSubscription {
+  subscription_id Int      @id @default(autoincrement())
+  user_id         Int      @unique
+  endpoint        String   @db.LongText
+  auth_key        String   @db.Text
+  p256dh_key      String   @db.Text
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  user User @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id])
 }
 
 model Session {

@@ -6,3 +6,7 @@ node_modules/
 .env*.local
 /src/generated/prisma
 deleteUser.js
+backfill*
+deleteAllMessages.js
+clearDatabase.js
+uploads/

@@ -45,7 +45,20 @@ exports.createMessage = async (req, res) => {
       }
     });
 
-    // Create message status for all chat members
+    // ✅ Auto-restore deleted chat when new message arrives
+    await prisma.chatVisibility.updateMany({
+      where: {
+        chat_id: parseInt(chat_id),
+        is_visible: false,
+        is_archived: false  // Only restore if deleted, not archived
+      },
+      data: {
+        is_visible: true,
+        hidden_at: null
+      }
+    });
+
+    // Create message status and visibility for all chat members
     const chatMembers = await prisma.chatMember.findMany({
       where: { chat_id: parseInt(chat_id) },
       select: { user_id: true }
@@ -59,6 +72,17 @@ exports.createMessage = async (req, res) => {
 
     await prisma.messageStatus.createMany({
       data: statusData
+    });
+
+    // Create message visibility for all members (default: visible)
+    const visibilityData = chatMembers.map(member => ({
+      message_id: message.message_id,
+      user_id: member.user_id,
+      is_visible: true
+    }));
+
+    await prisma.messageVisibility.createMany({
+      data: visibilityData
     });
 
     // Fetch complete message with relations
@@ -148,6 +172,19 @@ exports.uploadFileAndCreateMessage = async (req, res) => {
       }
     });
 
+    // ✅ Auto-restore deleted chat when new message arrives
+    await prisma.chatVisibility.updateMany({
+      where: {
+        chat_id: parseInt(chat_id),
+        is_visible: false,
+        is_archived: false  // Only restore if deleted, not archived
+      },
+      data: {
+        is_visible: true,
+        hidden_at: null
+      }
+    });
+
     // Create attachment record
     const fileUrl = `/uploads/${req.file.filename}`;
     const attachment = await prisma.attachment.create({
@@ -160,7 +197,7 @@ exports.uploadFileAndCreateMessage = async (req, res) => {
       }
     });
 
-    // Create message status for all chat members
+    // Create message status and visibility for all chat members
     const chatMembers = await prisma.chatMember.findMany({
       where: { chat_id: parseInt(chat_id) },
       select: { user_id: true }
@@ -174,6 +211,17 @@ exports.uploadFileAndCreateMessage = async (req, res) => {
 
     await prisma.messageStatus.createMany({
       data: statusData
+    });
+
+    // Create message visibility for all members (default: visible)
+    const visibilityData = chatMembers.map(member => ({
+      message_id: message.message_id,
+      user_id: member.user_id,
+      is_visible: true
+    }));
+
+    await prisma.messageVisibility.createMany({
+      data: visibilityData
     });
 
     // Fetch complete message with relations
@@ -220,30 +268,46 @@ exports.uploadFileAndCreateMessage = async (req, res) => {
 exports.getMessagesByChat = async (req, res) => {
   try {
     const chatId = parseInt(req.params.chatId);
+    const userId = parseInt(req.query.userId);
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
 
-    // Verify user is a member of the chat
-    const userId = parseInt(req.query.userId);
-    if (userId) {
-      const chatMember = await prisma.chatMember.findUnique({
-        where: {
-          chat_id_user_id: {
-            chat_id: chatId,
-            user_id: userId
-          }
-        }
-      });
+    // Validate chatId
+    if (isNaN(chatId)) {
+      return res.status(400).json({ error: 'Invalid chat_id' });
+    }
 
-      if (!chatMember) {
-        return res.status(403).json({ error: 'User is not a member of this chat' });
+    // Validate userId
+    if (isNaN(userId)) {
+      return res.status(400).json({ error: 'Invalid user_id' });
+    }
+
+    // Verify user is a member of the chat
+    const chatMember = await prisma.chatMember.findUnique({
+      where: {
+        chat_id_user_id: {
+          chat_id: chatId,
+          user_id: userId
+        }
       }
+    });
+
+    if (!chatMember) {
+      return res.status(403).json({ error: 'User is not a member of this chat' });
     }
 
     const [messages, totalCount] = await Promise.all([
       prisma.message.findMany({
-        where: { chat_id: chatId },
+        where: { 
+          chat_id: chatId,
+          visibility: {
+            some: {
+              user_id: userId,
+              is_visible: true
+            }
+          }
+        },
         include: {
           sender: {
             select: {
@@ -253,7 +317,7 @@ exports.getMessagesByChat = async (req, res) => {
               profile_pic: true
             }
           },
-          status: true, // Always include all statuses
+          status: true,
           attachments: {
             select: {
               attachment_id: true,
@@ -262,7 +326,14 @@ exports.getMessagesByChat = async (req, res) => {
               file_type: true,
               file_size: true
             }
-          }
+          },
+          visibility: {
+            select: {
+              user_id: true,
+              is_visible: true,
+              hidden_at: true
+            }
+          },
         },
         orderBy: { created_at: 'desc' },
         skip: skip,
@@ -287,12 +358,12 @@ exports.getMessagesByChat = async (req, res) => {
 };
 
 // Delete message
-exports.deleteMessage = async (req, res) => {
+exports.deleteMessageForAll = async (req, res) => {
   try {
     const messageId = parseInt(req.params.id);
-    const senderId = parseInt(req.body.sender_id || req.user.user_id); // Support both body and JWT
+    const userId = parseInt(req.body.user_id || req.user.user_id);
 
-    // Verify the message belongs to the sender
+    // Verify the message exists
     const existingMessage = await prisma.message.findUnique({
       where: { message_id: messageId },
       include: {
@@ -304,8 +375,24 @@ exports.deleteMessage = async (req, res) => {
       return res.status(404).json({ error: 'Message not found' });
     }
 
-    if (existingMessage.sender_id !== senderId) {
-      return res.status(403).json({ error: 'You can only delete your own messages' });
+    // Check if user is sender or group admin
+    const isSender = existingMessage.sender_id === userId;
+    
+    // Check if user is admin of the chat
+    const isAdmin = await prisma.groupAdmin.findUnique({
+      where: {
+        chat_id_user_id: {
+          chat_id: existingMessage.chat_id,
+          user_id: userId
+        }
+      }
+    });
+
+    // Allow if sender OR admin
+    if (!isSender && !isAdmin) {
+      return res.status(403).json({ 
+        error: 'Only message sender or group admin can delete this message for all' 
+      });
     }
 
     // Delete file attachments from disk
@@ -322,7 +409,11 @@ exports.deleteMessage = async (req, res) => {
       });
     }
 
-    // Delete related records first (cascade should handle this, but being explicit)
+    // Delete related records (in correct order)
+    await prisma.messageVisibility.deleteMany({
+      where: { message_id: messageId }
+    });
+
     await prisma.messageStatus.deleteMany({
       where: { message_id: messageId }
     });
@@ -335,7 +426,117 @@ exports.deleteMessage = async (req, res) => {
       where: { message_id: messageId }
     });
 
-    res.json({ message: 'Message deleted successfully' });
+    res.json({ 
+      message: 'Message deleted successfully for all members',
+      messageId,
+      deletedBy: isSender ? 'sender' : 'admin'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.deleteMessageForUser = async (req, res) => {
+  try {
+    const messageId = parseInt(req.params.id);
+    const userId = parseInt(req.body.user_id || req.user.user_id);
+
+    // Validate inputs
+    if (isNaN(messageId) || isNaN(userId)) {
+      return res.status(400).json({ error: 'Invalid message_id or user_id' });
+    }
+
+    // Verify message exists
+    const message = await prisma.message.findUnique({
+      where: { message_id: messageId },
+      select: { 
+        message_id: true,
+        chat_id: true,
+        sender_id: true
+      }
+    });
+
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    // Check if user is a member of the chat where message was sent
+    const isUserInChat = await prisma.chatMember.findUnique({
+      where: {
+        chat_id_user_id: {
+          chat_id: message.chat_id,
+          user_id: userId
+        }
+      }
+    });
+
+    if (!isUserInChat) {
+      return res.status(403).json({ error: 'User is not a member of this chat' });
+    }
+
+    // Update message visibility for this user to false
+    const updatedVisibility = await prisma.messageVisibility.update({
+      where: {
+        message_id_user_id: {
+          message_id: messageId,
+          user_id: userId
+        }
+      },
+      data: {
+        is_visible: false,
+        hidden_at: new Date()
+      }
+    });
+
+    if (!updatedVisibility) {
+      return res.status(500).json({ error: `Failed to delete message for user` });
+    }
+
+    // Check if message is hidden for all users
+    const visibleCount = await prisma.messageVisibility.count({
+      where: {
+        message_id: messageId,
+        is_visible: true
+      }
+    });
+
+    // If hidden for all, delete message from database
+    if (visibleCount === 0) {
+      // Delete attachments
+      await prisma.attachment.deleteMany({
+        where: { message_id: messageId }
+      });
+
+      // Delete message status
+      await prisma.messageStatus.deleteMany({
+        where: { message_id: messageId }
+      });
+
+      // Delete visibility records
+      await prisma.messageVisibility.deleteMany({
+        where: { message_id: messageId }
+      });
+
+      // Delete message
+      await prisma.message.delete({
+        where: { message_id: messageId }
+      });
+
+      return res.json({ 
+        message: 'Message deleted for user and removed from database (hidden for all members)',
+        messageId,
+        userId,
+        removedFromDb: true
+      });
+    }
+
+    res.json({ 
+      message: 'Message deleted for user',
+      messageId,
+      userId,
+      removedFromDb: false
+    });
+
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
