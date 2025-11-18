@@ -40,7 +40,19 @@ npm install
 DATABASE_URL="mysql://user:pass@host:3306/dbname"
 JWT_SECRET=your_jwt_secret
 PORT=3000
+
+# AI Features (Optional - powered by Google Gemini)
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-1.5-flash
+GEMINI_MAX_TOKENS=150
+GEMINI_TEMPERATURE=0.7
 ```
+
+**AI Features Configuration:**
+- `GEMINI_API_KEY` - Your Google Gemini API key (required for AI features). Get it from https://aistudio.google.com/apikey
+- `GEMINI_MODEL` - Model to use (default: `gemini-1.5-flash`, or use `gemini-1.5-pro` for better quality)
+- `GEMINI_MAX_TOKENS` - Maximum tokens per response (default: 150)
+- `GEMINI_TEMPERATURE` - Creativity level 0-1 (default: 0.7)
 
 3. Run Prisma migrations (apply existing migrations to your DB):
 
@@ -64,6 +76,84 @@ Check `package.json` for exact script names available in this repo.
 
 - Uploaded sample files live in `uploads/` in this workspace for reference. Use the upload routes in `src/routes/upload.routes.js` and controller `src/controller/upload.controller.js`.
 
+## AI Features
+
+This server includes AI-powered features using Google's Gemini AI models:
+
+### Available AI Endpoints
+
+All AI endpoints require authentication and are available at `/api/ai/`:
+
+1. **Smart Reply Suggestions** - `POST /api/ai/smart-replies`
+   - Generates contextual reply suggestions based on recent chat messages
+   - Body: `{ chat_id: number, limit?: number }`
+   - Returns: Array of suggested replies
+
+2. **Message Translation** - `POST /api/ai/translate`
+   - Translates messages to any language
+   - Body: `{ message_id?: number, text?: string, target_language: string, source_language?: string }`
+   - Supports: English (en), Spanish (es), French (fr), German (de), Hindi (hi), Chinese (zh), Japanese (ja), Korean (ko), Arabic (ar), Portuguese (pt), Russian (ru), Italian (it)
+
+3. **Conversation Summarization** - `POST /api/ai/summarize`
+   - Summarizes chat conversations
+   - Body: `{ chat_id: number, message_count?: number, summary_type?: 'brief'|'detailed'|'bullet' }`
+   - Types: brief (1-2 sentences), detailed (paragraph), bullet (bullet points)
+
+4. **Language Detection** - `POST /api/ai/detect-language`
+   - Detects the language of given text
+   - Body: `{ text: string }`
+
+5. **Conversation Starters** - `POST /api/ai/conversation-starters`
+   - Generates friendly conversation openers
+   - Body: `{ chat_id: number }`
+
+6. **AI Status Check** - `GET /api/ai/status`
+   - Checks if AI service is configured and lists available features
+
+### Example Usage
+
+```javascript
+// Smart Reply Suggestions
+fetch('/api/ai/smart-replies', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer YOUR_JWT_TOKEN'
+  },
+  body: JSON.stringify({
+    chat_id: 123,
+    limit: 3
+  })
+});
+
+// Translate Message
+fetch('/api/ai/translate', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer YOUR_JWT_TOKEN'
+  },
+  body: JSON.stringify({
+    text: "Hello, how are you?",
+    target_language: "es"
+  })
+});
+
+// Summarize Conversation
+fetch('/api/ai/summarize', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer YOUR_JWT_TOKEN'
+  },
+  body: JSON.stringify({
+    chat_id: 123,
+    message_count: 50,
+    summary_type: "brief"
+  })
+});
+```
+
 ## Notes & troubleshooting
 
 - If Prisma CLI complains about the `DATABASE_URL`, verify `.env` is loaded and the connection string is correct.
@@ -76,10 +166,4 @@ Check `package.json` for exact script names available in this repo.
 2. Add tests and keep changes small.
 3. Open a PR with a clear description.
 
-## License
-
-This project does not include a license file in this repository snapshot. Add a `LICENSE` if you plan to publish or share.
-
 ---
-
-If you want, I can update the README to include exact npm scripts from `package.json`, sample `.env` contents tailored to `src/config/database.js`, or a small run script for Windows PowerShell — tell me which you'd like.

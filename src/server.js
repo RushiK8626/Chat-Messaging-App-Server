@@ -125,6 +125,7 @@ app.get('/', (req, res) => {
             messages: '/api/messages',
             chats: '/api/chats',
             notifications: '/api/notifications',
+            ai: '/api/ai',
             health: '/health',
             socket: '/socket.io/ (WebSocket only - use browser or Socket.IO client)'
         }
@@ -139,6 +140,7 @@ const authRoutes = require('./routes/auth.routes');
 const uploadRoutes = require('./routes/upload.routes');
 const chatVisibilityRoutes = require('./routes/chatVisibility.routes');
 const notificationRoutes = require('./routes/notification.routes');
+const aiRoutes = require('./routes/ai.routes');
 
 // Use routes
 app.use('/api/users', userRoutes);
@@ -152,6 +154,7 @@ app.use('/api/chat-visibility', chatVisibilityRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/uploads', uploadRoutes); // Secure file serving
+app.use('/api/ai', aiRoutes); // AI features
 
 // Serve static files AFTER API routes to avoid conflicts
 app.use(express.static('.'));

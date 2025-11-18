@@ -2,96 +2,85 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// Ensure uploads directory exists
-const uploadsDir = path.join(__dirname, '../../uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
+const multerS3 = require('multer-s3');
+const { S3Client } = require('@aws-sdk/client-s3');
 
-// Configure storage
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadsDir);
-  },
-  filename: function (req, file, cb) {
-    // Create unique filename: timestamp-randomstring-originalname
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    const nameWithoutExt = path.basename(file.originalname, ext);
-    cb(null, nameWithoutExt + '-' + uniqueSuffix + ext);
-  }
+// S3 Client
+const s3 = new S3Client({
+  region: process.env.AWS_REGION || "ap-south-1",
+  credentials: process.env.AWS_ACCESS_KEY_ID
+    ? {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+      }
+    : undefined // if EC2 IAM role, credentials are automatically picked
 });
 
-// File filter to accept only certain file types
+// File Filter
+
 const fileFilter = (req, file, cb) => {
-  // Blocked MIME types (security risk)
   const blockedMimes = ['application/json', 'application/x-javascript', 'text/javascript'];
 
-  // Reject blocked MIME types
   if (blockedMimes.includes(file.mimetype)) {
     return cb(new Error(`File type ${file.mimetype} is not allowed for security reasons`), false);
   }
 
-  // Allowed file types
-  const allowedMimes = [
-    // Images
-    'image/jpeg',
-    'image/jpg',
-    'image/png',
-    'image/gif',
-    'image/webp',
-    'image/svg+xml',
-    // Documents
-    'application/pdf',
-    'application/msword',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'application/vnd.ms-excel',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'application/vnd.ms-powerpoint',
-    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-    'text/plain',
-    // Videos
-    'video/mp4',
-    'video/mpeg',
-    'video/webm',
-    'video/quicktime',
-    // Audio
-    'audio/mpeg',
-    'audio/wav',
-    'audio/webm',
-    'audio/ogg',
-    // Archives
-    'application/zip',
-    'application/x-rar-compressed',
-    'application/x-7z-compressed',
-    // Generic binary (fallback for files with unknown MIME type)
-    'application/octet-stream'
-  ];
-
-  // Check MIME type
-  if (allowedMimes.includes(file.mimetype)) {
-    cb(null, true);
-  } else if (file.mimetype === 'application/octet-stream') {
-    // For generic binary, allow based on file extension
-    console.log(`⚠️  Generic MIME type detected for ${file.originalname}. Allowing based on extension.`);
-    cb(null, true);
-  } else {
-    // For unknown MIME types, allow them (user can upload any file extension)
-    console.log(`ℹ️  Unknown MIME type ${file.mimetype} for ${file.originalname}. Allowing file.`);
-    cb(null, true);
-  }
+  cb(null, true);
 };
 
-// Create multer instance with configuration
+
+// Conditional Storage (S3 or Local)
+let storage;
+
+if (process.env.USE_S3_UPLOAD === "true") {
+  // ----------- S3 Storage -----------
+  storage = multerS3({
+    s3: s3,
+    bucket: process.env.AWS_S3_BUCKET,
+    acl: 'public-read',
+    contentType: multerS3.AUTO_CONTENT_TYPE,
+
+    key: function (req, file, cb) {
+      const ext = path.extname(file.originalname);
+      const nameWithoutExt = path.basename(file.originalname, ext);
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+
+      cb(null, `uploads/${nameWithoutExt}-${uniqueSuffix}${ext}`);
+    }
+  });
+
+} else {
+  // ----------- Local Storage -----------
+  const uploadsDir = path.join(__dirname, '../../uploads');
+
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+
+  storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+      cb(null, uploadsDir);
+    },
+    filename: function (req, file, cb) {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      const ext = path.extname(file.originalname);
+      const nameWithoutExt = path.basename(file.originalname, ext);
+
+      cb(null, `${nameWithoutExt}-${uniqueSuffix}${ext}`);
+    }
+  });
+}
+
+// Multer Instance
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB max file size
+    fileSize: 50 * 1024 * 1024 // 50MB
   }
 });
 
-// Helper function to get file type category
+// File Type Helper
 const getFileTypeCategory = (mimetype) => {
   if (mimetype.startsWith('image/')) return 'image';
   if (mimetype.startsWith('video/')) return 'video';
@@ -106,6 +95,5 @@ const getFileTypeCategory = (mimetype) => {
 
 module.exports = {
   upload,
-  uploadsDir,
   getFileTypeCategory
 };
