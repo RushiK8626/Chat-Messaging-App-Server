@@ -59,7 +59,6 @@ exports.createOTP = async (userId, otpType = 'login', txClient = null) => {
       }
     });
 
-    console.log(`📱 OTP Generated for User ${userIdInt}: ${otpCode}, expires: ${expiresAt}`);
     return { otpCode, expiresAt };
     
   } catch (error) {
@@ -114,7 +113,6 @@ exports.sendOTPEmail = async (email, otpCode, otpType) => {
       `
     });
 
-    console.log(`✅ Email sent to: ${email}`);
   } catch (error) {
     console.error('Error sending email:', error);
     throw error;
@@ -127,14 +125,12 @@ exports.sendOTP = async (user, otpCode, otpType) => {
     // Priority 1: Email (always works)
     if (user.email) {
       await this.sendOTPEmail(user.email, otpCode, otpType);
-      console.log(`✅ OTP sent to email: ${user.email}`);
       return { success: true, method: 'email', destination: user.email };
     }
     
     // Priority 2: SMS (only in production)
     if (user.phone) {
       await this.sendOTPSMS(user.phone, otpCode, otpType);
-      console.log(`✅ OTP sent to phone: ${user.phone}`);
       return { success: true, method: 'sms', destination: user.phone };
     }
     
@@ -168,7 +164,6 @@ exports.sendOTPSMS = async (phoneNumber, otpCode, otpType) => {
       to: phoneNumber
     });
 
-    console.log(`✅ SMS sent successfully. SID: ${message.sid}`);
     return { success: true, sid: message.sid };
 
   } catch (error) {
@@ -192,9 +187,6 @@ exports.verifyOTP = async (userId, otpCode, otpType = 'login') => {
       return { success: false, message: 'User not found' };
     }
 
-    // Log for debugging
-    console.log(`🔍 Verifying OTP: userId=${userIdInt}, code=${otpCode}, type=${otpType}`);
-
     // Normal OTP verification - ensure types match
     const otp = await prisma.otp.findFirst({
       where: {
@@ -205,12 +197,6 @@ exports.verifyOTP = async (userId, otpCode, otpType = 'login') => {
       }
     });
 
-    // Debug: Check all OTPs for this user
-    const allOtps = await prisma.otp.findMany({
-      where: { user_id: userIdInt, otp_type: otpType }
-    });
-    console.log(`📋 All OTPs for user ${userIdInt}:`, allOtps);
-
     if (!otp) {
       return { success: false, message: 'Invalid or expired OTP' };
     }
@@ -219,7 +205,6 @@ exports.verifyOTP = async (userId, otpCode, otpType = 'login') => {
       where: { otp_id: otp.otp_id }
     });
 
-    console.log(`✅ OTP verified and deleted for user ${userIdInt}`);
     return { success: true, message: 'OTP verified successfully' };
 
   } catch (error) {

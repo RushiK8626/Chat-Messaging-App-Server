@@ -1,6 +1,7 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const aiService = require('../services/ai.service');
+const { Receive } = require('twilio/lib/twiml/FaxResponse');
 
 /**
  * Generate smart reply suggestions
@@ -76,7 +77,7 @@ exports.generateSmartReplies = async (req, res) => {
       context_messages: messages.length,
     });
   } catch (error) {
-    console.error('❌ Error in generateSmartReplies:', error);
+    console.error('Error in generateSmartReplies:', error);
     res.status(500).json({ 
       error: 'Failed to generate smart replies',
       details: error.message,
@@ -144,7 +145,7 @@ exports.translateMessage = async (req, res) => {
       ...translation,
     });
   } catch (error) {
-    console.error('❌ Error in translateMessage:', error);
+    console.error('Error in translateMessage:', error);
     res.status(500).json({ 
       error: 'Failed to translate message',
       details: error.message,
@@ -231,7 +232,7 @@ exports.summarizeConversation = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('❌ Error in summarizeConversation:', error);
+    console.error('Error in summarizeConversation:', error);
     res.status(500).json({ 
       error: 'Failed to summarize conversation',
       details: error.message,
@@ -260,7 +261,7 @@ exports.detectLanguage = async (req, res) => {
       ...result,
     });
   } catch (error) {
-    console.error('❌ Error in detectLanguage:', error);
+    console.error('Error in detectLanguage:', error);
     res.status(500).json({ 
       error: 'Failed to detect language',
       details: error.message,
@@ -286,9 +287,7 @@ exports.generateConversationStarters = async (req, res) => {
     const chat = await prisma.chat.findUnique({
       where: { chat_id: parseInt(chat_id) },
       include: {
-        members: {
-          where: { user_id: userId },
-        },
+        members: true,
       },
     });
 
@@ -301,10 +300,25 @@ exports.generateConversationStarters = async (req, res) => {
       return res.status(403).json({ error: 'You are not a member of this chat' });
     }
 
+    recipientName = '';
+
+    if(chat.chat_type == 'private') {
+      const otherMember = chat.members.find(member => member.user_id !== userId);
+      const otherUserId = otherMember ? otherMember.user_id : null;
+
+      const users = await prisma.user.findUnique({
+        where: { user_id: otherUserId },
+        select: { full_name: true }
+      });
+
+      recipientName = users.full_name.split(' ')[0];
+    }
+
     // Prepare context
     const context = {
       chatType: chat.is_group_chat ? 'group' : 'direct',
       chatName: chat.chat_name,
+      recipientName: recipientName
     };
 
     // Generate starters
@@ -316,7 +330,7 @@ exports.generateConversationStarters = async (req, res) => {
       starters,
     });
   } catch (error) {
-    console.error('❌ Error in generateConversationStarters:', error);
+    console.error('Error in generateConversationStarters:', error);
     res.status(500).json({ 
       error: 'Failed to generate conversation starters',
       details: error.message,
@@ -347,7 +361,7 @@ exports.checkStatus = async (req, res) => {
         : 'AI service is not configured. Please add GEMINI_API_KEY to environment variables.',
     });
   } catch (error) {
-    console.error('❌ Error checking AI status:', error);
+    console.error('Error checking AI status:', error);
     res.status(500).json({ 
       error: 'Failed to check AI service status',
       details: error.message,

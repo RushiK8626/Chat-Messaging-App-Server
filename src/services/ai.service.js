@@ -42,7 +42,7 @@ Conversation:
 ${conversationContext}
 
 Generate ${count} different reply suggestions that would make sense as responses to the last message from ${lastMessage.sender}.
-Return ONLY the suggestions, one per line, without numbering or formatting.`;
+Return ONLY the suggestions, one per line, without numbering or formatting. You can use suitable emoji in message`;
 
     const model = genAI.getGenerativeModel({ 
       model: AI_CONFIG.model,
@@ -62,10 +62,9 @@ Return ONLY the suggestions, one per line, without numbering or formatting.`;
       .filter(line => line.trim())
       .slice(0, count);
 
-    console.log(`✅ Generated ${suggestions.length} smart reply suggestions`);
     return suggestions;
   } catch (error) {
-    console.error('❌ Error generating smart replies:', error.message);
+    console.error('Error generating smart replies:', error.message);
     throw error;
   }
 };
@@ -114,7 +113,6 @@ const translateMessage = async (text, targetLanguage, sourceLanguage = 'auto') =
       ? `Translate the following text to ${targetLangName}. Only return the translation, nothing else:\n\n${text}`
       : `Translate the following text from ${languageNames[sourceLanguage] || sourceLanguage} to ${targetLangName}. Only return the translation, nothing else:\n\n${text}`;
 
-    console.log(prompt);
     const model = genAI.getGenerativeModel({ 
       model: AI_CONFIG.model,
       generationConfig: {
@@ -127,15 +125,13 @@ const translateMessage = async (text, targetLanguage, sourceLanguage = 'auto') =
     const response = await result.response;
     const translatedText = response.text().trim();
 
-    console.log(`✅ Translated text to ${targetLangName}`);
-    console.log(response.text());
     return {
       translatedText,
       sourceLanguage,
       targetLanguage,
     };
   } catch (error) {
-    console.error('❌ Error translating message:', error.message);
+    console.error('Error translating message:', error.message);
     throw error;
   }
 };
@@ -191,10 +187,9 @@ Summary:`;
     const response = await result.response;
     const summary = response.text().trim();
 
-    console.log(`✅ Generated ${summaryType} summary for ${messages.length} messages`);
     return summary;
   } catch (error) {
-    console.error('❌ Error summarizing conversation:', error.message);
+    console.error('Error summarizing conversation:', error.message);
     throw error;
   }
 };
@@ -228,13 +223,12 @@ const detectLanguage = async (text) => {
     const response = await result.response;
     const languageCode = response.text().trim().toLowerCase();
 
-    console.log(`✅ Detected language: ${languageCode}`);
     return {
       languageCode,
       text: text.substring(0, 100), // Return snippet for verification
     };
   } catch (error) {
-    console.error('❌ Error detecting language:', error.message);
+    console.error('Error detecting language:', error.message);
     throw error;
   }
 };
@@ -253,10 +247,14 @@ const generateConversationStarters = async (context) => {
     const { chatType, chatName, recipientName } = context;
     
     let prompt;
+
+    // Shared instruction to ensure clean output
+    const strictOutputRules = "IMPORTANT: Output ONLY the 3 specific message options. Do not include numbering (1., 2., 3.), bullet points, greetings to me, or phrases like 'Here are the starters'. Just return the 3 lines of text. You can use emoji in the messages.";
+
     if (chatType === 'group') {
-      prompt = `Generate 3 friendly conversation starters for a group chat named "${chatName}". Make them casual and appropriate for starting a group discussion.`;
+      prompt = `Generate 3 short friendly icebreakers to start a conversation in a new $ chat named "${chatName}". The tone should be welcoming and encourage members to start talking for the first time. ${strictOutputRules}`;
     } else {
-      prompt = `Generate 3 friendly conversation starters for a direct message with ${recipientName || 'a friend'}. Make them casual and natural.`;
+      prompt = `Generate 3 short friendly conversation starters for a direct message with a new connection named ${recipientName || 'a new friend'}. The context is saying hello for the very first time, so make them engaging but polite. ${strictOutputRules}`;
     }
 
     const model = genAI.getGenerativeModel({ 
@@ -278,10 +276,9 @@ const generateConversationStarters = async (context) => {
       .map(line => line.replace(/^\d+\.\s*/, '').trim()) // Remove numbering
       .slice(0, 3);
 
-    console.log(`✅ Generated ${starters.length} conversation starters`);
     return starters;
   } catch (error) {
-    console.error('❌ Error generating conversation starters:', error.message);
+    console.error('Error generating conversation starters:', error.message);
     throw error;
   }
 };

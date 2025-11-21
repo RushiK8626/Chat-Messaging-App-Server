@@ -5,6 +5,7 @@ const path = require('path');
 const { Server } = require('socket.io'); 
 const { initializeSocket } = require('./socket/socketHandler');
 const { testConnection } = require('./config/database');
+const { initRedis, closeRedis } = require('./config/redis');
 
 // Load environment variables based on NODE_ENV
 const dotenv = require('dotenv');
@@ -13,9 +14,7 @@ const envPath = path.join(__dirname, '..', envFile);
 const result = dotenv.config({ path: envPath });
 
 if (result.error) {
-  console.error(`❌ Error loading ${envFile} file:`, result.error);
-} else {
-  console.log(`✅ Loaded ${Object.keys(result.parsed || {}).length} environment variables from ${envFile}`);
+  console.error(`Error loading ${envFile} file:`, result.error);
 }
 
 // create express application
@@ -31,9 +30,6 @@ const io = new Server(server, {
     maxHttpBufferSize: 100 * 1024 * 1024, // 100MB to support large file uploads
     cors: {
         origin: function (origin, callback) {
-            // Log the origin for debugging
-            console.log('🔍 Socket.IO CORS Origin:', origin);
-            
             // Allow localhost, trycloudflare domains, and GitHub Pages
             const allowedOrigins = [
                 "http://localhost:3000",
@@ -52,10 +48,8 @@ const io = new Server(server, {
             // Allow if no origin, or if in allowed list, or if it's a trycloudflare domain, github.io, convohub-api.me, or Vercel-hosted frontend
             if (!origin || allowedOrigins.includes(origin) || 
                 (origin && (origin.includes('.trycloudflare.com') || origin.includes('.github.io') || origin.includes('convohub-api.me') || origin.includes('vercel.app')))) {
-                console.log('✅ Socket.IO CORS Allowed');
                 callback(null, true);
             } else {
-                console.log('❌ Socket.IO CORS Blocked:', origin);
                 callback(new Error('Not allowed by CORS'));
             }
         },
@@ -69,9 +63,6 @@ const io = new Server(server, {
 const cors = require('cors');
 app.use(cors({
     origin: function (origin, callback) {
-        // Log the origin for debugging
-        console.log('🔍 CORS Origin:', origin);
-        
         // Allow localhost, trycloudflare domains, and GitHub Pages
         const allowedOrigins = [
             "http://localhost:3000",
@@ -90,10 +81,8 @@ app.use(cors({
         // Allow if no origin, or if in allowed list, or if it's a trycloudflare domain, github.io, convohub-api.me, or Vercel-hosted frontend
         if (!origin || allowedOrigins.includes(origin) || 
             (origin && (origin.includes('.trycloudflare.com') || origin.includes('.github.io') || origin.includes('convohub-api.me') || origin.includes('vercel.app')))) {
-            console.log('✅ CORS Allowed');
             callback(null, true);
         } else {
-            console.log('❌ CORS Blocked:', origin);
             callback(new Error('Not allowed by CORS'));
         }
     },
@@ -107,12 +96,6 @@ app.use(cors({
 // basic express middleware
 app.use(express.json()); // parse JSON request bodies
 app.use(express.urlencoded({ extended: true })); // parse URL-encoded bodies
-
-// Log all incoming requests for debugging
-app.use((req, res, next) => {
-    console.log(`${req.method} ${req.path}`);
-    next();
-});
 
 // simple test route to check if server is running (MUST BE BEFORE STATIC FILES)
 app.get('/', (req, res) => {
@@ -141,6 +124,7 @@ const uploadRoutes = require('./routes/upload.routes');
 const chatVisibilityRoutes = require('./routes/chatVisibility.routes');
 const notificationRoutes = require('./routes/notification.routes');
 const aiRoutes = require('./routes/ai.routes');
+const userCacheRoutes = require('./routes/user-cache.routes');
 
 // Use routes
 app.use('/api/users', userRoutes);
@@ -155,6 +139,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/uploads', uploadRoutes); // Secure file serving
 app.use('/api/ai', aiRoutes); // AI features
+app.use('/api/cache', userCacheRoutes); // User cache endpoints
 
 // Serve static files AFTER API routes to avoid conflicts
 app.use(express.static('.'));
@@ -171,25 +156,40 @@ app.get('/health', async (req, res) => {
 // Initialize socket handler
 initializeSocket(io);
 
+// Initialize Redis
+(async () => {
+  try {
+    await initRedis();
+  } catch (error) {
+    console.error('Warning: Redis not available, some features may be limited');
+  }
+})();
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  await closeRedis();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  await closeRedis();
+  process.exit(0);
+});
+
 // start the server
 const PORT = process.env.PORT || 3001;
 
 // Start server only after DB connection is confirmed
 async function startServer() {
-  const dbUrl = process.env.DATABASE_URL || 'Database URL not set';
-  console.log(`🔗 Attempting to connect to database at: ${dbUrl}`);
-
   const dbConnected = await testConnection();
   
   if (!dbConnected) {
-    console.error('❌ Failed to connect to database. Server not started.');
+    console.error('Failed to connect to database. Server not started.');
     process.exit(1);
   }
   
   server.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}`);
-    console.log(`📡 Socket.IO is ready for connections`);
-    console.log(`🔐 JWT Authentication enabled`);
+    console.log(`Server is running on port ${PORT}`);
   });
 }
 

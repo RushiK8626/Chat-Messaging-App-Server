@@ -1,3 +1,7 @@
+const userCacheService = require('../services/user-cache.service');
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+
 // Search chats by member name (private) or chat name (group)
 exports.searchChats = async (req, res) => {
   try {
@@ -63,9 +67,8 @@ exports.searchChats = async (req, res) => {
     res.status(500).json({ error: 'Failed to search chats' });
   }
 };
-const { PrismaClient } = require('@prisma/client');
+
 const notificationService = require('../services/notification.service');
-const prisma = new PrismaClient();
 
 // Create a new chat (private or group)
 exports.createChat = async (req, res) => {
@@ -76,7 +79,6 @@ exports.createChat = async (req, res) => {
     // Handle group image upload
     if (req.file) {
       groupImagePath = `/uploads/${req.file.filename}`;
-      console.log(`📷 Group image uploaded: ${groupImagePath}`);
     }
 
     // Validation
@@ -221,7 +223,7 @@ exports.createChat = async (req, res) => {
       }
     });
 
-    // ✅ Create ChatVisibility records for all chat members (default: active)
+    // Create ChatVisibility records for all chat members (default: active)
     await prisma.chatVisibility.createMany({
       data: parsedMemberIds.map(user_id => ({
         chat_id: chat.chat_id,
@@ -234,12 +236,15 @@ exports.createChat = async (req, res) => {
       skipDuplicates: true  // Skip if record already exists
     });
 
-    console.log(`✅ ChatVisibility records created for ${parsedMemberIds.length} members of chat ${chat.chat_id}`);
-
     res.status(201).json({
       message: 'Chat created successfully',
       chat
     });
+
+    // Invalidate chat memberships cache for all members
+    for (const memberId of parsedMemberIds) {
+      await userCacheService.invalidateChatMemberships(parseInt(memberId));
+    }
 
   } catch (error) {
     console.error('Create chat error:', error);
@@ -314,6 +319,15 @@ exports.getUserChats = async (req, res) => {
     const { userId } = req.params;
     const { page = 1, limit = 20 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    // Try cache first (only for first page)
+    if (parseInt(page) === 1) {
+      const cachedChats = await userCacheService.getCachedChatMemberships(parseInt(userId));
+      if (cachedChats) {
+        console.log(`Cache HIT for user chats ${userId}`);
+        return res.json({ chats: cachedChats });
+      }
+    }
 
     const chats = await prisma.chat.findMany({
       where: {
@@ -520,24 +534,24 @@ exports.getUserChatsPreview = async (req, res) => {
           
           if (fileType) {
             if (fileType.startsWith('image/')) {
-              previewText = '📷 Image';
+              previewText = 'Image';
             } else if (fileType.startsWith('video/')) {
-              previewText = '🎥 Video';
+              previewText = 'Video';
             } else if (fileType.startsWith('audio/')) {
-              previewText = '🎵 Audio';
+              previewText = 'Audio';
             } else if (fileType.includes('pdf')) {
-              previewText = '📄 PDF';
+              previewText = 'PDF';
             } else if (fileType.includes('word') || fileType.includes('document')) {
-              previewText = '📝 Document';
+              previewText = 'Document';
             } else if (fileType.includes('excel') || fileType.includes('sheet')) {
-              previewText = '📊 Spreadsheet';
+              previewText = 'Spreadsheet';
             } else if (fileType.includes('zip') || fileType.includes('rar')) {
-              previewText = '📦 Archive';
+              previewText = 'Archive';
             } else {
-              previewText = '📎 Attachment';
+              previewText = 'Attachment';
             }
           } else {
-            previewText = '📎 File';
+            previewText = 'File';
           }
         }
 
@@ -669,7 +683,7 @@ exports.addChatMember = async (req, res, io) => {
       }
     });
 
-    // ✅ Create ChatVisibility record for new member
+    // Create ChatVisibility record for new member
     await prisma.chatVisibility.create({
       data: {
         chat_id: parseInt(chatId),
@@ -679,9 +693,7 @@ exports.addChatMember = async (req, res, io) => {
       }
     });
 
-    console.log(`✅ User ${user_id} added to group chat ${chatId}`);
-
-    // ✅ Emit WebSocket notification to all chat members
+    //  Emit WebSocket notification to all chat members
     if (io) {
       io.to(`chat_${chatId}`).emit('member_added', {
         chat_id: parseInt(chatId),
@@ -694,7 +706,6 @@ exports.addChatMember = async (req, res, io) => {
         timestamp: new Date(),
         message: `${newUser.full_name || newUser.username} joined the group`
       });
-      console.log(`📢 Notified members of user ${user_id} joining chat ${chatId}`);
 
       // NEW: Send direct notification to added user
       // Get the current user (admin who added this member)
@@ -710,18 +721,16 @@ exports.addChatMember = async (req, res, io) => {
         chat_image: chat.chat_image,
         message: `You were added to "${chat.chat_name}" by ${currentUser?.full_name || 'an admin'}`
       });
-      console.log(`📢 Notified user ${user_id} that added to chat ${chatId}`);
 
-      // 📤 Send push notification to added user
+      // Send push notification to added user
       try {
         await notificationService.notifyUserAddedToGroup(user_id, {
           chat_id: parseInt(chatId),
           chat_name: chat.chat_name,
           added_by_username: currentUser?.username || 'Admin'
         });
-        console.log(`📬 Push notification sent to user ${user_id}`);
       } catch (pushError) {
-        console.error('❌ Failed to send push notification:', pushError.message);
+        console.error('Failed to send push notification:', pushError.message);
       }
     }
 
@@ -814,9 +823,7 @@ exports.removeChatMember = async (req, res, io) => {
       }
     });
 
-    console.log(`✅ User ${userId} removed from group chat ${chatId}`);
-
-    // ✅ Emit WebSocket notification to all remaining chat members
+    // Emit WebSocket notification to all remaining chat members
     if (io) {
       io.to(`chat_${chatId}`).emit('member_removed', {
         chat_id: parseInt(chatId),
@@ -829,7 +836,6 @@ exports.removeChatMember = async (req, res, io) => {
         timestamp: new Date(),
         message: `${removedUserDetails.full_name || removedUserDetails.username} was removed from the group`
       });
-      console.log(`📢 Notified members of user ${userId} removal from chat ${chatId}`);
 
       // NEW: Send direct notification to removed user
       // Get the current user (admin who removed this member)
@@ -856,7 +862,6 @@ exports.removeChatMember = async (req, res, io) => {
       await prisma.chat.delete({
         where: { chat_id: parseInt(chatId) }
       });
-      console.log(`🗑️  Deleted empty group chat ${chatId}`);
     }
 
     res.json({ message: 'Member removed successfully' });
@@ -877,7 +882,6 @@ exports.updateChat = async (req, res) => {
     let chatImagePath = null;
     if (req.file) {
       chatImagePath = `/uploads/${req.file.filename}`;
-      console.log(`📷 Group image updated: ${chatImagePath}`);
     }
 
     // Get old chat data to detect what changed
@@ -908,7 +912,7 @@ exports.updateChat = async (req, res) => {
       }
     });
 
-    // 📢 Send push notifications for group info changes
+    // Send push notifications for group info changes
     try {
       const memberIds = chat.members.map(m => m.user.user_id);
       const currentUser = await prisma.user.findUnique({
@@ -931,12 +935,9 @@ exports.updateChat = async (req, res) => {
         change_type: changeType,
         changed_by_username: currentUser?.username || 'Admin'
       });
-      console.log(`📬 Group info change notifications sent to ${memberIds.length} members`);
-    } catch (pushError) {
-      console.error('❌ Failed to send group info change notifications:', pushError.message);
-    }
-
-    res.json({
+      } catch (pushError) {
+        console.error('Failed to send group info change notifications:', pushError.message);
+      }    res.json({
       message: 'Chat updated successfully',
       chat
     });
@@ -989,15 +990,6 @@ exports.getChatInfo = async (req, res) => {
         }
       }
     });
-
-    // Debug: print fetched chat object for troubleshooting
-    console.log('Get public chat info - raw result:', chat);
-    try {
-      console.log('Get public chat info - JSON:', JSON.stringify(chat, null, 2));
-    } catch (err) {
-      console.log('Get public chat info - JSON stringify failed:', err);
-      console.dir(chat, { depth: null });
-    }
 
     if (!chat) {
       return res.status(404).json({ error: 'Chat not found' });
@@ -1087,8 +1079,6 @@ exports.exitGroupChat = async (req, res, io) => {
       }
     });
 
-    console.log(`✅ User ${userIdInt} exited group chat ${chatIdInt}`);
-
     // If user was an admin, remove from GroupAdmin table too
     await prisma.groupAdmin.deleteMany({
       where: {
@@ -1108,7 +1098,7 @@ exports.exitGroupChat = async (req, res, io) => {
       remaining_members: remainingMembers
     };
 
-    // ✅ Emit WebSocket notification to remaining chat members
+    // Emit WebSocket notification to remaining chat members
     if (io && exitingUser) {
       io.to(`chat_${chatIdInt}`).emit('member_exited', {
         chat_id: chatIdInt,
@@ -1122,7 +1112,6 @@ exports.exitGroupChat = async (req, res, io) => {
         timestamp: new Date(),
         message: `${exitingUser.full_name || exitingUser.username} left the group`
       });
-      console.log(`📢 Notified members of user ${userIdInt} exiting chat ${chatIdInt}`);
     }
 
     // If chat is empty, optionally delete it
@@ -1161,9 +1150,6 @@ exports.exitGroupChat = async (req, res, io) => {
       await prisma.chat.delete({
         where: { chat_id: chatIdInt }
       });
-
-      response.message = 'Exited group chat. Chat deleted as it has no remaining members.';
-      console.log(`✅ Empty group chat ${chatIdInt} deleted`);
     }
 
     res.json(response);

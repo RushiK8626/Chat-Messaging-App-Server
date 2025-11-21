@@ -23,6 +23,7 @@ router.put('/:id/profile-pic', userController.updateUserProfilePic);
 router.post('/:id/block', userController.blockUser);
 router.delete('/:id/unblock/:blockedUserId', userController.unblockUser);
 router.get('/:id/blocked', userController.getBlockedUsers);
+router.get('/:id/block-status/:otherUserId', userController.checkBlockStatus);
 router.get('/:id/notifications', userController.getUserNotifications);
 
 module.exports = router;

@@ -1,3 +1,5 @@
+const userCacheService = require('../services/user-cache.service');
+
 // Search users by name or username (public, paginated)
 exports.searchUsersPublic = async (req, res) => {
   try {
@@ -63,21 +65,8 @@ exports.getUserById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const user = await prisma.user.findUnique({
-      where: { user_id: parseInt(id) },
-      select: {
-        user_id: true,
-        username: true,
-        email: true,
-        phone: true,
-        full_name: true,
-        profile_pic: true,
-        status_message: true,
-        is_online: true,
-        last_seen: true,
-        created_at: true
-      }
-    });
+    // Try cache first
+    const user = await userCacheService.getUserProfile(parseInt(id));
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -111,8 +100,6 @@ exports.updateUser = async (req, res) => {
       where: { user_id: parseInt(id) },
       data: {
         ...(full_name && { full_name }),
-        // ...(email && { email }),
-        // ...(phone && { phone }),
         ...(username && { username }),
         ...(status_message !== undefined && { status_message }),
         ...(profile_pic !== undefined && { profile_pic })
@@ -120,14 +107,15 @@ exports.updateUser = async (req, res) => {
       select: {
         user_id: true,
         username: true,
-        // email: true,
-        // phone: true,
         full_name: true,
         profile_pic: true,
         status_message: true,
         created_at: true
       }
     });
+
+    // Invalidate user cache
+    await userCacheService.invalidateUserProfile(parseInt(id));
 
     res.json({
       message: 'User updated successfully',
@@ -284,6 +272,46 @@ exports.getBlockedUsers = async (req, res) => {
       }
     });
     res.json(blockedUsers);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Check if users are blocked (either direction)
+exports.checkBlockStatus = async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    const otherUserId = parseInt(req.params.otherUserId);
+
+    if (userId === otherUserId) {
+      return res.status(400).json({ error: 'Cannot check block status with same user' });
+    }
+
+    // Check if current user blocked the other user
+    const currentUserBlocked = await prisma.blockedUser.findUnique({
+      where: {
+        user_id_blocked_user_id: {
+          user_id: userId,
+          blocked_user_id: otherUserId
+        }
+      }
+    });
+
+    // Check if other user blocked the current user
+    const otherUserBlocked = await prisma.blockedUser.findUnique({
+      where: {
+        user_id_blocked_user_id: {
+          user_id: otherUserId,
+          blocked_user_id: userId
+        }
+      }
+    });
+
+    res.json({
+      currentUserBlockedOther: !!currentUserBlocked,
+      otherUserBlockedCurrent: !!otherUserBlocked,
+      isBlocked: !!currentUserBlocked || !!otherUserBlocked
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

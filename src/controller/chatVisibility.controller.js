@@ -26,7 +26,7 @@ exports.archiveChat = async (req, res) => {
       return res.status(403).json({ error: 'Not a member of this chat' });
     }
 
-    // ✅ Hide all messages in this chat for this user (for archive)
+    // Hide all messages in this chat for this user (for archive)
     const messagesInChat = await prisma.message.findMany({
       where: { chat_id: parseInt(chatId) },
       select: { message_id: true }
@@ -45,7 +45,6 @@ exports.archiveChat = async (req, res) => {
           hidden_at: new Date()
         }
       });
-      console.log(`✅ Hid ${messageIds.length} messages in chat ${chatId} for user ${userId} (archive)`);
     }
 
     // Create or update ChatVisibility record
@@ -107,7 +106,7 @@ exports.unarchiveChat = async (req, res) => {
       }
     });
 
-    // ✅ Restore message visibility when unarchiving
+    // Restore message visibility when unarchiving
     // Get all messages that were hidden during archive
     const messagesInChat = await prisma.message.findMany({
       where: { chat_id: parseInt(chatId) },
@@ -128,7 +127,6 @@ exports.unarchiveChat = async (req, res) => {
           hidden_at: null
         }
       });
-      console.log(`✅ Restored visibility for ${messageIds.length} messages in chat ${chatId} for user ${userId}`);
     }
 
     res.json({
@@ -168,7 +166,7 @@ exports.deleteChat = async (req, res) => {
       return res.status(403).json({ error: 'Not a member of this chat' });
     }
 
-    // ✅ Hide all messages in this chat for this user
+    // Hide all messages in this chat for this user
     // Get all message IDs in this chat
     const messagesInChat = await prisma.message.findMany({
       where: { chat_id: parseInt(chatId) },
@@ -189,7 +187,6 @@ exports.deleteChat = async (req, res) => {
           hidden_at: new Date()
         }
       });
-      console.log(`✅ Hid ${messageIds.length} messages in chat ${chatId} for user ${userId}`);
     }
 
     // Create or update ChatVisibility record
@@ -395,11 +392,9 @@ exports.getActiveChats = async (req, res) => {
 
     const total = chatIds.length;
 
-    
     // Format the chat previews
     const chatPreviews = activeChats.map(chat => {
       const lastMessage = chat.messages[0];
-      // console.log(chat);
       
       // Get pinned status - chatVisibility is an array due to the include
       // let isPinned = false;
@@ -434,24 +429,24 @@ exports.getActiveChats = async (req, res) => {
           
           if (fileType) {
             if (fileType.startsWith('image/')) {
-              previewText = '📷 Image';
+              previewText = 'Image';
             } else if (fileType.startsWith('video/')) {
-              previewText = '🎥 Video';
+              previewText = 'Video';
             } else if (fileType.startsWith('audio/')) {
-              previewText = '🎵 Audio';
+              previewText = 'Audio';
             } else if (fileType.includes('pdf')) {
-              previewText = '📄 PDF';
+              previewText = 'PDF';
             } else if (fileType.includes('word') || fileType.includes('document')) {
-              previewText = '📝 Document';
+              previewText = 'Document';
             } else if (fileType.includes('excel') || fileType.includes('sheet')) {
-              previewText = '📊 Spreadsheet';
+              previewText = 'Spreadsheet';
             } else if (fileType.includes('zip') || fileType.includes('rar')) {
-              previewText = '📦 Archive';
+              previewText = 'Archive';
             } else {
-              previewText = '📎 Attachment';
+              previewText = 'Attachment';
             }
           } else {
-            previewText = '📎 File';
+            previewText = 'File';
           }
         }
 
@@ -680,7 +675,6 @@ exports.batchDeleteChats = async (req, res) => {
           hidden_at: new Date()
         }
       });
-      console.log(`✅ Hid ${messageIds.length} messages in ${parsedChatIds.length} chats for user ${userId}`);
     }
 
     // Update or create ChatVisibility records for all chats
@@ -849,8 +843,6 @@ exports.batchMarkReadChats = async (req, res) => {
       }
     });
 
-    console.log(`✅ Marked ${result.count} messages as read in ${parsedChatIds.length} chats for user ${userId}`);
-
     res.json({
       message: `Marked ${result.count} messages as read in ${parsedChatIds.length} chats`,
       marked_count: result.count,
@@ -974,7 +966,6 @@ exports.batchArchiveChats = async (req, res) => {
           hidden_at: new Date()
         }
       });
-      console.log(`✅ Hid ${messageIds.length} messages in ${parsedChatIds.length} chats for user ${userId} (archive)`);
     }
 
     // Update or create ChatVisibility records
@@ -1067,7 +1058,6 @@ exports.batchUnarchiveChats = async (req, res) => {
           hidden_at: null
         }
       });
-      console.log(`✅ Restored visibility for ${messageIds.length} messages in ${parsedChatIds.length} chats for user ${userId}`);
     }
 
     // Update ChatVisibility records

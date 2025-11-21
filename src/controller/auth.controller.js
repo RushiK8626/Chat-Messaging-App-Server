@@ -21,7 +21,6 @@ exports.requestPasswordReset = async (req, res) => {
     
     await otpService.sendOTP({ email }, otpCode, 'forgot-password');
 
-    console.log(`🔑 Password reset OTP for ${email}:`, otpCode);
     res.json({ 
       user_id: user.user_id,
       message: 'OTP sent to email if user exists' 
@@ -82,7 +81,6 @@ setInterval(() => {
   for (const [username, data] of pendingRegistrations.entries()) {
     if (data.expiresAt < now) {
       pendingRegistrations.delete(username);
-      console.log(`⏰ Registration expired for username: ${username}`);
     }
   }
   
@@ -90,7 +88,6 @@ setInterval(() => {
   for (const [userId, data] of pendingLogins.entries()) {
     if (data.expiresAt < now) {
       pendingLogins.delete(userId);
-      console.log(`⏰ Login OTP expired for userId: ${userId}`);
     }
   }
 }, 60000); // Check every minute
@@ -130,17 +127,9 @@ exports.register = async (req, res) => {
     const otpCode = otpService.generateOTP();
     const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes from now
 
-    console.log('🔑 Generated OTP for registration:', {
-      username,
-      otpCode,
-      otpType: typeof otpCode,
-      expiresAt: new Date(expiresAt)
-    });
-
     // Set timeout to auto-delete after 5 minutes
     const timeoutId = setTimeout(() => {
       pendingRegistrations.delete(username);
-      console.log(`⏰ Registration auto-expired for username: ${username}`);
     }, 5 * 60 * 1000);
 
     // Store user data in memory
@@ -150,8 +139,6 @@ exports.register = async (req, res) => {
       expiresAt,
       timeoutId
     });
-
-    console.log(`📝 Pending registration created for: ${username}, OTP: ${otpCode}`);
 
     await otpService.sendOTP({ email, phone }, otpCode, 'register');
 
@@ -169,8 +156,6 @@ exports.verifyRegistrationOTP = async (req, res) => {
   try {
     const { username, otpCode } = req.body;
 
-    console.log('🔍 OTP Verification Request:', { username, otpCode });
-
     if (!username || !otpCode) {
       return res.status(400).json({ error: 'Username and OTP code are required' });
     }
@@ -178,23 +163,13 @@ exports.verifyRegistrationOTP = async (req, res) => {
     const registrationData = pendingRegistrations.get(username);
 
     if (!registrationData) {
-      console.log('❌ No pending registration found for username:', username);
       return res.status(400).json({ error: 'OTP expired or invalid. Please register again.' });
     }
-
-    console.log('📝 Stored Registration Data:', {
-      username,
-      storedOTP: registrationData.otpCode,
-      enteredOTP: otpCode,
-      expiresAt: new Date(registrationData.expiresAt),
-      isExpired: registrationData.expiresAt < Date.now()
-    });
 
     // Check if OTP expired
     if (registrationData.expiresAt < Date.now()) {
       pendingRegistrations.delete(username);
       clearTimeout(registrationData.timeoutId);
-      console.log('⏰ OTP expired for username:', username);
       return res.status(400).json({ error: 'OTP expired. Please register again.' });
     }
 
@@ -202,20 +177,9 @@ exports.verifyRegistrationOTP = async (req, res) => {
     const storedOTP = String(registrationData.otpCode);
     const enteredOTP = String(otpCode);
     
-    console.log('🔐 OTP Comparison:', {
-      storedOTP,
-      enteredOTP,
-      storedType: typeof registrationData.otpCode,
-      enteredType: typeof otpCode,
-      match: storedOTP === enteredOTP
-    });
-
     if (storedOTP !== enteredOTP) {
-      console.log('❌ OTP mismatch!');
       return res.status(400).json({ error: 'Invalid OTP. Please try again.' });
     }
-
-    console.log('✅ OTP matched! Creating user...');
 
     try {
       const { userData } = registrationData;
@@ -236,8 +200,6 @@ exports.verifyRegistrationOTP = async (req, res) => {
       // Clear timeout and remove from pending registrations
       clearTimeout(registrationData.timeoutId);
       pendingRegistrations.delete(username);
-
-      console.log(`✅ User ${username} registered successfully`);
 
       res.status(201).json({ 
         message: 'Registration successful.', 
@@ -272,7 +234,6 @@ exports.cancelRegistration = async (req, res) => {
     if (registrationData) {
       clearTimeout(registrationData.timeoutId);
       pendingRegistrations.delete(username);
-      console.log(`✅ Registration canceled for username: ${username}`);
       res.status(200).json({ message: 'Registration canceled successfully. You can register again.' });
     } else {
       // No pending registration found (already expired or completed)
@@ -309,7 +270,6 @@ exports.resendRegistrationOTP = async (req, res) => {
     clearTimeout(registrationData.timeoutId);
     const newTimeoutId = setTimeout(() => {
       pendingRegistrations.delete(username);
-      console.log(`⏰ Registration auto-expired for username: ${username}`);
     }, 5 * 60 * 1000);
 
     // Update with new OTP and expiry
@@ -326,8 +286,6 @@ exports.resendRegistrationOTP = async (req, res) => {
         newOtpCode, 
         'register'
       );
-
-      console.log(`🔄 OTP resent for username: ${username}`);
 
       res.status(200).json({ 
         message: 'OTP resent successfully. Please check your email/phone.',
@@ -395,18 +353,9 @@ exports.login = async (req, res) => {
     const otpCode = otpService.generateOTP();
     const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
 
-    console.log('🔑 Generated OTP for login:', {
-      userId: user.user_id,
-      username: user.username,
-      otpCode,
-      otpType: typeof otpCode,
-      expiresAt: new Date(expiresAt)
-    });
-
     // Set timeout to auto-delete after 5 minutes
     const timeoutId = setTimeout(() => {
       pendingLogins.delete(user.user_id);
-      console.log(`⏰ Login OTP auto-expired for userId: ${user.user_id}`);
     }, 5 * 60 * 1000);
 
     // Store OTP in memory
@@ -421,8 +370,6 @@ exports.login = async (req, res) => {
         phone: user.phone
       }
     });
-
-    console.log(`📝 Pending login OTP created for: ${user.username}, OTP: ${otpCode}`);
 
     // Send OTP
     try {
@@ -461,8 +408,6 @@ exports.verifyLoginOTP = async (req, res) => {
   try {
     const { userId, username, otpCode } = req.body;
 
-    console.log('🔍 Login OTP Verification Request:', { userId, username, otpCode });
-
     if ((!userId && !username) || !otpCode) {
       return res.status(400).json({ error: 'Username (or User ID) and OTP code are required' });
     }
@@ -486,23 +431,13 @@ exports.verifyLoginOTP = async (req, res) => {
     const loginData = pendingLogins.get(userIdToVerify);
 
     if (!loginData) {
-      console.log('❌ No pending login found for userId:', userIdToVerify);
       return res.status(400).json({ error: 'OTP expired or invalid. Please login again.' });
     }
-
-    console.log('📝 Stored Login OTP Data:', {
-      userId: userIdToVerify,
-      storedOTP: loginData.otpCode,
-      enteredOTP: otpCode,
-      expiresAt: new Date(loginData.expiresAt),
-      isExpired: loginData.expiresAt < Date.now()
-    });
 
     // Check if OTP expired
     if (loginData.expiresAt < Date.now()) {
       pendingLogins.delete(userIdToVerify);
       clearTimeout(loginData.timeoutId);
-      console.log('⏰ Login OTP expired for userId:', userIdToVerify);
       return res.status(400).json({ error: 'OTP expired. Please login again.' });
     }
 
@@ -510,20 +445,9 @@ exports.verifyLoginOTP = async (req, res) => {
     const storedOTP = String(loginData.otpCode);
     const enteredOTP = String(otpCode);
     
-    console.log('🔐 Login OTP Comparison:', {
-      storedOTP,
-      enteredOTP,
-      storedType: typeof loginData.otpCode,
-      enteredType: typeof otpCode,
-      match: storedOTP === enteredOTP
-    });
-
     if (storedOTP !== enteredOTP) {
-      console.log('❌ Login OTP mismatch!');
       return res.status(400).json({ error: 'Invalid OTP. Please try again.' });
     }
-
-    console.log('✅ Login OTP matched! Generating tokens...');
 
     // Get user details
     const userDetails = await prisma.user.findUnique({
@@ -559,8 +483,6 @@ exports.verifyLoginOTP = async (req, res) => {
     // Clear timeout and remove from pending logins
     clearTimeout(loginData.timeoutId);
     pendingLogins.delete(userIdToVerify);
-
-    console.log(`✅ User ${userDetails.username} logged in successfully`);
 
     res.json({
       message: 'Login successful',

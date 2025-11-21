@@ -2,6 +2,7 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const path = require('path');
 const fs = require('fs');
+const cacheService = require('../services/cache.service');
 const { emitFileMessage } = require('../socket/socketHandler');
 
 // ========== ESSENTIAL MESSAGE FUNCTIONS ONLY ==========
@@ -45,7 +46,7 @@ exports.createMessage = async (req, res) => {
       }
     });
 
-    // ✅ Auto-restore deleted chat when new message arrives
+    // Auto-restore deleted chat when new message arrives
     await prisma.chatVisibility.updateMany({
       where: {
         chat_id: parseInt(chat_id),
@@ -172,7 +173,7 @@ exports.uploadFileAndCreateMessage = async (req, res) => {
       }
     });
 
-    // ✅ Auto-restore deleted chat when new message arrives
+    // Auto-restore deleted chat when new message arrives
     await prisma.chatVisibility.updateMany({
       where: {
         chat_id: parseInt(chat_id),
@@ -265,6 +266,59 @@ exports.uploadFileAndCreateMessage = async (req, res) => {
 };
 
 // Get messages by chat ID with pagination
+// Get recent messages (cache-first strategy) - FAST
+exports.getRecentMessages = async (req, res) => {
+  try {
+    console.log('req.params:', req.params);
+    console.log('req.query:', req.query);
+    
+    const chatId = parseInt(req.params.chatId);
+    const userId = parseInt(req.query.userId);
+    const limit = parseInt(req.query.limit) || 50;
+
+    console.log('Parsed values - chatId:', chatId, 'userId:', userId, 'limit:', limit);
+
+    // Validate chatId
+    if (isNaN(chatId)) {
+      return res.status(400).json({ error: 'Invalid chat_id', params: req.params });
+    }
+
+    // Validate userId
+    if (isNaN(userId)) {
+      return res.status(400).json({ error: 'Invalid user_id' });
+    }
+
+    // Verify user is a member of the chat
+    const chatMember = await prisma.chatMember.findUnique({
+      where: {
+        chat_id_user_id: {
+          chat_id: chatId,
+          user_id: userId
+        }
+      }
+    });
+
+    if (!chatMember) {
+      return res.status(403).json({ error: 'User is not a member of this chat' });
+    }
+
+    // Try cache first, fallback to database
+    const messages = await cacheService.getMessages(chatId, userId, limit);
+
+    res.json({
+      messages: messages.reverse(), // Oldest first
+      count: messages.length,
+      cached: true,
+      limit
+    });
+
+  } catch (error) {
+    console.error('Get recent messages error:', error);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+};
+
+// Get messages with pagination (database query) - For older messages
 exports.getMessagesByChat = async (req, res) => {
   try {
     const chatId = parseInt(req.params.chatId);

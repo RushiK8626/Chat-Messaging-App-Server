@@ -1,19 +1,13 @@
 const { PrismaClient } = require('@prisma/client');
 const jwtService = require('../services/jwt.service');
 const notificationService = require('../services/notification.service');
+const cacheService = require('../services/cache.service');
+const userCacheService = require('../services/user-cache.service');
 const prisma = new PrismaClient();
 const path = require('path');
 const fs = require('fs');
-
-// Store active users and their socket connections
-const activeUsers = new Map(); // userId -> { socketId, username, status }
-const userSockets = new Map(); // socketId -> userId
-
-// Store registration socket connections (username -> socketId)
-const registrationSockets = new Map();
-
-// Store login socket connections (userId -> socketId)
-const loginSockets = new Map();
+const redis = require("../config/redis");
+const { secureHeapUsed } = require('crypto');
 
 // Store io instance for use in helper functions
 let ioInstance = null;
@@ -23,8 +17,6 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
   try {
     const { chat_id, message_text, fileBuffer, fileName, fileType, fileSize, tempId } = fileData;
     const sender_id = userId;
-
-    console.log(`🔧 Processing complete file message: ${fileName} (${fileSize} bytes)`);
 
     // Verify sender is a member of the chat
     const chatMember = await prisma.chatMember.findUnique({
@@ -65,9 +57,8 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
     
     try {
       fs.writeFileSync(filePath, buffer);
-      console.log(`✅ File saved: ${serverFilename} at path: ${filePath}`);
     } catch (writeErr) {
-      console.error(`❌ Failed to write file to disk:`, writeErr);
+      console.error(`Failed to write file to disk:`, writeErr);
       socket.emit('file_upload_error', { 
         error: 'Failed to save file to disk',
         details: writeErr.message,
@@ -98,7 +89,7 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
       }
     });
 
-    // ✅ Auto-restore deleted chat when new message arrives
+    // Auto-restore deleted chat when new message arrives
     // If this chat was deleted (is_visible=false, is_archived=false), restore it
     // BUT: Do NOT restore old messages - only the chat visibility
     await prisma.chatVisibility.updateMany({
@@ -113,8 +104,6 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
       }
     });
 
-    console.log(`✅ Message created: ${message.message_id}`);
-
     // Create attachment record
     const fileUrl = `/uploads/${serverFilename}`;
     const attachment = await prisma.attachment.create({
@@ -126,8 +115,6 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
         file_size: fileSize
       }
     });
-
-    console.log(`✅ Attachment created: ${attachment.attachment_id} with file_url: ${fileUrl}`);
 
     // Create message status and visibility for all chat members
     const chatMembers = await prisma.chatMember.findMany({
@@ -189,15 +176,18 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
       }
     });
 
-    console.log(`✅ Complete message fetched with ${completeMessage.attachments.length} attachment(s)`);
-
     // Broadcast to all users in the chat room
     io.to(`chat_${chat_id}`).emit('new_message', {
       ...completeMessage,
       tempId // Include temp ID for client matching
     });
 
-    // 📢 Send push notifications to recipients (exclude sender)
+    // Cache the file message
+    cacheService.addMessageToCache(parseInt(chat_id), completeMessage).catch(err => {
+      console.error('Failed to cache file message:', err.message);
+    });
+
+    // Send push notifications to recipients (exclude sender)
     const fileMessageRecipientIds = chatMembers
       .map(m => m.user_id)
       .filter(id => id !== sender_id);
@@ -212,12 +202,14 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
             message_text: fileInfo?.original_filename || `Shared a ${messageType}`,
             chat_id: parseInt(chat_id),
             chat_name: completeMessage.chat.chat_name || completeMessage.sender.username,
+            chat_type: completeMessage.chat.chat_type,
+            chat_image: completeMessage.chat.chat_image,
             message_type: messageType
           },
           fileMessageRecipientIds
         );
       } catch (pushError) {
-        console.error('❌ Failed to send push notifications:', pushError.message);
+        console.error(' Failed to send push notifications:', pushError.message);
       }
     }
 
@@ -230,8 +222,6 @@ const _processCompleteFileMessage = async (fileData, socket, io, userId) => {
       status: 'sent',
       timestamp: completeMessage.created_at
     });
-
-    console.log(`✅ File message ${completeMessage.message_id} sent in chat ${chat_id} by user ${sender_id}`);
 
   } catch (error) {
     console.error('Error in _processCompleteFileMessage:', error);
@@ -250,14 +240,12 @@ const initializeSocket = (io) => {
   const registrationNamespace = io.of('/registration');
   
   registrationNamespace.on('connection', (socket) => {
-    console.log('Registration socket connected:', socket.id);
 
     // Handle registration monitoring
-    socket.on('monitor_registration', (data) => {
+    socket.on('monitor_registration', async (data) => {
       const { username } = data;
       if (username) {
-        registrationSockets.set(username, socket.id);
-        console.log(`👀 Monitoring registration for: ${username}`);
+        await redis.set(`registration:socket:${username}`, socket.id, { EX: 300 });
         
         socket.emit('monitoring_started', { username });
       }
@@ -274,36 +262,17 @@ const initializeSocket = (io) => {
         if (registrationData) {
           clearTimeout(registrationData.timeoutId);
           pendingRegistrations.delete(username);
-          console.log(`❌ Registration canceled via socket for: ${username}`);
           
           socket.emit('registration_cancelled', { username });
         }
         
-        registrationSockets.delete(username);
+        await redis.del(`registration:socket:${username}`);
       }
     });
 
     // Handle disconnection - auto-cancel registration
-    socket.on('disconnect', () => {
-      console.log('Registration socket disconnected:', socket.id);
-      
-      // Find and cancel any registration associated with this socket
-      for (const [username, socketId] of registrationSockets.entries()) {
-        if (socketId === socket.id) {
-          const authController = require('../controller/auth.controller');
-          const pendingRegistrations = authController.getPendingRegistrations();
-          
-          const registrationData = pendingRegistrations.get(username);
-          if (registrationData) {
-            clearTimeout(registrationData.timeoutId);
-            pendingRegistrations.delete(username);
-            console.log(`🔌 Registration auto-canceled on disconnect for: ${username}`);
-          }
-          
-          registrationSockets.delete(username);
-          break;
-        }
-      }
+    socket.on('disconnect', async () => {
+      await cleanupRegistrationBySocket(socket);
     });
   });
 
@@ -311,14 +280,12 @@ const initializeSocket = (io) => {
   const loginNamespace = io.of('/login');
   
   loginNamespace.on('connection', (socket) => {
-    console.log('Login socket connected:', socket.id);
 
     // Handle login OTP monitoring
-    socket.on('monitor_login', (data) => {
+    socket.on('monitor_login', async (data) => {
       const { userId } = data;
       if (userId) {
-        loginSockets.set(parseInt(userId), socket.id);
-        console.log(`👀 Monitoring login OTP for userId: ${userId}`);
+        await redis.set(`login:socket:${userId}`, socket.id, { EX: 300 });
         
         socket.emit('monitoring_started', { userId });
       }
@@ -335,36 +302,17 @@ const initializeSocket = (io) => {
         if (loginData) {
           clearTimeout(loginData.timeoutId);
           pendingLogins.delete(parseInt(userId));
-          console.log(`❌ Login canceled via socket for userId: ${userId}`);
           
           socket.emit('login_cancelled', { userId });
         }
         
-        loginSockets.delete(parseInt(userId));
+        await redis.del(`login:socket:${userId}`);
       }
     });
 
     // Handle disconnection - auto-cancel login
-    socket.on('disconnect', () => {
-      console.log('Login socket disconnected:', socket.id);
-      
-      // Find and cancel any login associated with this socket
-      for (const [userId, socketId] of loginSockets.entries()) {
-        if (socketId === socket.id) {
-          const authController = require('../controller/auth.controller');
-          const pendingLogins = authController.getPendingLogins();
-          
-          const loginData = pendingLogins.get(userId);
-          if (loginData) {
-            clearTimeout(loginData.timeoutId);
-            pendingLogins.delete(userId);
-            console.log(`🔌 Login auto-canceled on disconnect for userId: ${userId}`);
-          }
-          
-          loginSockets.delete(userId);
-          break;
-        }
-      }
+    socket.on('disconnect', async () => {
+      await cleanupLoginBySocket(socket);
     });
   });
 
@@ -409,17 +357,17 @@ const initializeSocket = (io) => {
     const user = socket.user;
     const userId = user.user_id;
 
-    // Store user connection
-    activeUsers.set(userId, {
+    await redis.hSet(`active:user:${userId}`, {
       socketId: socket.id,
-      username: user.username,
-      full_name: user.full_name,
-      profile_pic: user.profile_pic,
-      status: 'online',
-      lastSeen: new Date()
+      username: user.username || '',
+      full_name: user.full_name || '',
+      profile_pic: user.profile_pic || '',
+      status: "online",
+      lastSeen: new Date().toISOString()
     });
+    await redis.expire(`active:user:${userId}`, 86400);
 
-    userSockets.set(socket.id, userId);
+    await redis.set(`socket:user:${socket.id}`, String(userId), { EX: 86400 });
 
     // Update user online status in database
     await prisma.user.update({
@@ -447,16 +395,11 @@ const initializeSocket = (io) => {
     // Join user to their chat rooms
     userChats.forEach(chatMember => {
       socket.join(`chat_${chatMember.chat_id}`);
-      console.log(`👥 User ${userId} joined room: chat_${chatMember.chat_id}`);
     });
-    console.log(`✅ User ${userId} joined ${userChats.length} chat rooms`);
 
-    // ✅ Join user to their personal notification room for direct events
+    // Join user to their personal notification room for direct events
     // This allows the user to receive direct notifications like:
-    // - you_were_added_to_group
-    // - you_were_removed_from_group
     socket.join(`user_${userId}`);
-    console.log(`📬 User ${userId} joined personal notification room: user_${userId}`);
 
     // Create/update user session
     await prisma.session.create({
@@ -488,8 +431,6 @@ const initializeSocket = (io) => {
       user: user,
       chats: userChats
     });
-
-    console.log(`User ${user.username} (${userId}) connected with JWT`);
 
 
     // ========== TEXT MESSAGE HANDLER ==========
@@ -538,6 +479,41 @@ const initializeSocket = (io) => {
           socket.emit('message_error', errorData);
           if (typeof ack === 'function') ack({ success: false, error: 'Not a chat member' });
           return;
+        }
+
+        const chat = await prisma.chat.findUnique({
+          where: {
+            chat_id: parseInt(chat_id)
+          },
+          include: {
+            members: true
+          }
+        });
+      
+        if (chat && chat.chat_type === 'private') {
+          if (chat.members.length < 2) {
+            return; 
+          }
+          firstMember = chat.members[0];
+          secondMember = chat.members[1];
+          blockedUsers = await prisma.blockedUser.findMany({
+            where: {
+              OR: [
+                {user_id: firstMember.user_id, blocked_user_id: secondMember.user_id},
+                {user_id: secondMember.user_id, blocked_user_id: firstMember.user_id}
+              ]
+            }
+          })
+
+          if(blockedUsers.length > 0) {
+            const errorData = { 
+              error: 'User is blocked',
+              tempId
+            };
+            socket.emit('message_error', errorData);
+            if (typeof ack === 'function') ack({ success: false, error: 'User blocked' });
+            return;
+          }
         }
 
         // Create message in database
@@ -610,7 +586,7 @@ const initializeSocket = (io) => {
           select: { user_id: true }
         });
 
-        // ✅ Auto-restore deleted chat when new message arrives
+        // Auto-restore deleted chat when new message arrives
         // If this chat was deleted (is_visible=false, is_archived=false), restore it
         // BUT: Do NOT restore old messages - only the chat visibility
         await prisma.chatVisibility.updateMany({
@@ -624,7 +600,6 @@ const initializeSocket = (io) => {
             hidden_at: null
           }
         });
-        console.log(`✅ Auto-restored deleted chat ${chat_id} due to new message from user ${sender_id}`);
 
         // Create message status for all members
         const statusData = chatMembers.map(member => ({
@@ -700,14 +675,13 @@ const initializeSocket = (io) => {
           ...completeMessage,
           tempId: messageData.tempId // Send back temp ID for client matching
         });
-        console.log(`📡 Broadcasting 'new_message' to room chat_${chat_id}`, {
-          message_id: completeMessage.message_id,
-          sender_id: sender_id,
-          chat_id: chat_id,
-          room_size: io.sockets.adapter.rooms.get(`chat_${chat_id}`)?.size || 0
+
+        // Cache the message for faster retrieval
+        cacheService.addMessageToCache(parseInt(chat_id), completeMessage).catch(err => {
+          console.error('Failed to cache message:', err.message);
         });
 
-        // 📢 Send push notifications to recipients (exclude sender)
+        // Send push notifications to recipients (exclude sender)
         const recipientIds = chatMembers
           .map(m => m.user_id)
           .filter(id => id !== parseInt(sender_id));
@@ -721,12 +695,14 @@ const initializeSocket = (io) => {
                 message_text: completeMessage.message_text,
                 chat_id: parseInt(chat_id),
                 chat_name: completeMessage.chat.chat_name || completeMessage.sender.username,
+                chat_type: completeMessage.chat.chat_type,
+                chat_image: completeMessage.chat.chat_image,
                 message_type: completeMessage.message_type
               },
               recipientIds
             );
           } catch (pushError) {
-            console.error('❌ Failed to send push notifications:', pushError.message);
+            console.error(' Failed to send push notifications:', pushError.message);
             // Don't fail the message send, just log the error
           }
         }
@@ -747,8 +723,6 @@ const initializeSocket = (io) => {
             tempId: messageData.tempId
           });
         }
-
-        console.log(`✓ Message ${completeMessage.message_id} sent in chat ${chat_id} by user ${sender_id}`);
 
       } catch (error) {
         console.error('Error in send_message:', error);
@@ -797,7 +771,7 @@ const initializeSocket = (io) => {
         });
 
         if (!existingStatus) {
-          console.warn(`❌ No message status found for message ${parsedMessageId} and user ${userId}`);
+          console.warn(`No message status found for message ${parsedMessageId} and user ${userId}`);
           socket.emit('status_error', { error: 'Message status record not found' });
           return;
         }
@@ -823,7 +797,7 @@ const initializeSocket = (io) => {
         });
 
         if (!message) {
-          console.warn(`❌ Message not found: ${parsedMessageId}`);
+          console.warn(`Message not found: ${parsedMessageId}`);
           socket.emit('status_error', { error: 'Message not found' });
           return;
         }
@@ -835,8 +809,6 @@ const initializeSocket = (io) => {
           status: status,
           updated_at: updatedStatus.updated_at
         });
-
-        console.log(`✓ Message ${parsedMessageId} marked as ${status} by user ${userId}`);
 
       } catch (error) {
         console.error('Error in update_message_status:', error);
@@ -901,7 +873,6 @@ const initializeSocket = (io) => {
             if (fs.existsSync(filePath)) {
               try {
                 fs.unlinkSync(filePath);
-                console.log(`🗑️  File deleted: ${filePath}`);
               } catch (err) {
                 console.error('Error deleting file:', err);
               }
@@ -926,7 +897,10 @@ const initializeSocket = (io) => {
           where: { message_id: messageIdInt }
         });
 
-        console.log(`🗑️  Message ${messageIdInt} deleted for all members by ${isSender ? 'sender' : 'admin'} (user ${userId})`);
+        // Remove from cache
+        cacheService.removeMessageFromCache(messageIdInt, message.chat_id).catch(err => {
+          console.error('Failed to remove message from cache:', err.message);
+        });
 
         // Broadcast deletion to all chat members
         io.to(`chat_${message.chat_id}`).emit('message_deleted_for_all', {
@@ -1043,7 +1017,10 @@ const initializeSocket = (io) => {
             where: { message_id: messageIdInt }
           });
 
-          console.log(`🗑️  Message ${messageIdInt} removed from database (hidden for all members)`);
+          // Remove from cache
+          cacheService.removeMessageFromCache(messageIdInt, message.chat_id).catch(err => {
+            console.error('Failed to remove message from cache:', err.message);
+          });
 
           // Broadcast to all chat members that message is deleted
           io.to(`chat_${message.chat_id}`).emit('message_deleted_for_all', {
@@ -1061,8 +1038,6 @@ const initializeSocket = (io) => {
             removed_from_db: true
           });
         }
-
-        console.log(`✓ Message ${messageIdInt} deleted for user ${userId}`);
 
         // Notify only the requesting user (personal deletion)
         socket.emit('delete_success', {
@@ -1165,12 +1140,16 @@ const initializeSocket = (io) => {
           data: { status_message }
         });
 
-        // Update in active users
-        if (activeUsers.has(userId)) {
-          const userData = activeUsers.get(userId);
-          userData.status_message = status_message;
-          activeUsers.set(userId, userData);
+        const key = `active:user:${userId}`;
+        const exists = await redis.exists(key);
+
+        if (exists) {
+          await redis.hSet(key, {
+            status_message: status_message || '',
+            lastSeen: new Date().toISOString()
+          });
         }
+
 
         // Broadcast status update
         socket.broadcast.emit('user_status_updated', {
@@ -1185,17 +1164,14 @@ const initializeSocket = (io) => {
     });
 
     // Handle getting online users
-    socket.on('get_online_users', () => {
-      const onlineUsers = Array.from(activeUsers.entries()).map(([userId, userData]) => ({
-        user_id: userId,
-        username: userData.username,
-        full_name: userData.full_name,
-        profile_pic: userData.profile_pic,
-        status: userData.status,
-        lastSeen: userData.lastSeen
-      }));
-
-      socket.emit('online_users', onlineUsers);
+    socket.on('get_online_users', async () => {
+      try {
+        const onlineUsers = await getOnlineUsers();
+        socket.emit('online_users', onlineUsers);
+      } catch (err) {
+        console.error("Error fetching online users:", err);
+        socket.emit('online_users', []);  // fail-safe
+      }
     });
 
     // ========== FILE UPLOAD VIA WEBSOCKET ==========
@@ -1203,8 +1179,6 @@ const initializeSocket = (io) => {
     socket.on('send_file_message', async (fileData, ack) => {
       try {
         const { chat_id, message_text, fileBuffer, fileName, fileType, fileSize, tempId } = fileData;
-
-        console.log(`📤 File upload started: ${fileName} (${fileSize} bytes) from user ${userId}`);
 
         // Validation
         if (!chat_id) {
@@ -1258,20 +1232,16 @@ const initializeSocket = (io) => {
       }
     });
 
-    // ========== CHUNKED FILE UPLOAD VIA WEBSOCKET ==========
-    // Store chunk data temporarily (in production, use Redis or database)
-    const fileChunks = new Map(); // tempId -> { chunks: [], metadata: {...} }
-
+    
     socket.on('send_file_message_chunk', async (chunkData, ack) => {
       try {
         const { 
           tempId, 
-          chunkData: chunk, 
+          chunk,  // Base64 chunk data
           chunkIndex, 
           totalChunks, 
           isFirstChunk,
           isLastChunk,
-          // First chunk includes metadata
           chat_id,
           fileName,
           fileSize,
@@ -1279,57 +1249,64 @@ const initializeSocket = (io) => {
           message_text
         } = chunkData;
 
-        console.log(`📦 Received chunk ${chunkIndex}/${totalChunks} for tempId: ${tempId}`);
-
-        // Initialize chunk storage on first chunk
+        // Store metadata on first chunk
         if (isFirstChunk) {
-          fileChunks.set(tempId, {
-            chunks: [],
-            metadata: {
-              chat_id,
-              fileName,
-              fileSize,
-              fileType,
-              message_text,
-              userId: userId
-            },
-            receivedChunks: 0
+          await redis.hSet(`file:meta:${tempId}`, {
+            chat_id: String(chat_id),
+            fileName: String(fileName || ''),
+            fileSize: String(fileSize || 0),
+            fileType: String(fileType || ''),
+            message_text: String(message_text || ''),
+            userId: String(userId),
+            totalChunks: String(totalChunks),
+            receivedChunks: '0'
           });
+          await redis.expire(`file:meta:${tempId}`, 600); // 10 min TTL
         }
 
-        // Store the chunk
-        const fileData = fileChunks.get(tempId);
-        if (fileData) {
-          fileData.chunks[chunkIndex] = chunk;
-          fileData.receivedChunks++;
+        // Store the chunk in a list (append to end)
+        await redis.rPush(`file:chunks:${tempId}`, JSON.stringify({
+          index: chunkIndex,
+          data: chunk
+        }));
+        await redis.expire(`file:chunks:${tempId}`, 600); // 10 min TTL
 
-          // Send ack for this chunk
-          if (typeof ack === 'function') {
-            ack({ success: true, chunkIndex });
-          }
+        // Increment received chunks counter
+        const received = await redis.hIncrBy(`file:meta:${tempId}`, 'receivedChunks', 1);
 
-          // If all chunks received, combine and process
-          if (isLastChunk && fileData.receivedChunks === totalChunks) {
-            console.log(`✅ All ${totalChunks} chunks received for tempId: ${tempId}`);
-            
-            // Combine all chunks
-            const completeBase64 = fileData.chunks.join('');
-            
-            // Process the complete file (same as regular file upload)
-            await _processCompleteFileMessage({
-              ...fileData.metadata,
-              fileBuffer: completeBase64,
-              tempId
-            }, socket, io, userId);
-            
-            // Clean up
-            fileChunks.delete(tempId);
-          }
-        } else {
-          console.error(`❌ No file data found for tempId: ${tempId}`);
-          if (typeof ack === 'function') {
-            ack({ success: false, error: 'File data not found' });
-          }
+        // Send ack for this chunk
+        if (typeof ack === 'function') {
+          ack({ success: true, chunkIndex, receivedChunks: received });
+        }
+
+        // If all chunks received, combine and process
+        if (isLastChunk && received === totalChunks) {
+          const meta = await redis.hGetAll(`file:meta:${tempId}`);
+          const chunksData = await redis.lRange(`file:chunks:${tempId}`, 0, -1);
+          
+          // Parse and sort chunks by index
+          const chunks = chunksData
+            .map(c => JSON.parse(c))
+            .sort((a, b) => a.index - b.index)
+            .map(c => c.data);
+          
+          // Combine all chunks
+          const completeBase64 = chunks.join('');
+          
+          // Process the complete file
+          await _processCompleteFileMessage({
+            chat_id: parseInt(meta.chat_id),
+            fileName: meta.fileName,
+            fileSize: parseInt(meta.fileSize),
+            fileType: meta.fileType,
+            message_text: meta.message_text,
+            fileBuffer: completeBase64,
+            tempId
+          }, socket, io, parseInt(meta.userId));
+          
+          // Clean up
+          await redis.del(`file:meta:${tempId}`);
+          await redis.del(`file:chunks:${tempId}`);
         }
       } catch (error) {
         console.error('Error in send_file_message_chunk:', error);
@@ -1348,17 +1325,17 @@ const initializeSocket = (io) => {
         progress, // 0-100
         tempId
       });
-      console.log(`📊 Upload progress: ${progress}% for tempId: ${tempId}`);
     });
 
     // ========== USER DISCONNECT ==========
     socket.on('disconnect', async () => {
       try {
-        const userId = userSockets.get(socket.id);
+        const userIdStr = await redis.get(`socket:user:${socket.id}`);
+        const userId = userIdStr ? parseInt(userIdStr) : null;
         
         if (userId) {
           // Update last seen time
-          const userData = activeUsers.get(userId);
+          const userData = await redis.hGetAll(`active:user:${userId}`);
           if (userData) {
             // Update user offline status in database with retry logic and timeout
             try {
@@ -1390,29 +1367,29 @@ const initializeSocket = (io) => {
                 lastSeen: new Date()
               });
 
-              console.log(`✅ User ${userData.username} (${userId}) disconnected`);
+              // console.log(`User ${userData.username} (${userId}) disconnected`);
             } catch (dbError) {
               if (dbError.message === 'Update timeout') {
                 console.warn(`⚠️  Database update timeout for user ${userId}, skipping`);
               } else if (dbError.code === 'HY000') {
-                console.warn(`⚠️  Database lock timeout for user ${userId}, skipping offline update`);
+                console.warn(`Database lock timeout for user ${userId}, skipping offline update`);
               } else {
-                console.error(`❌ Error updating user ${userId} status:`, dbError.message);
+                console.error(`Error updating user ${userId} status:`, dbError.message);
               }
               // Don't throw - cleanup will continue regardless
             }
           }
 
           // Clean up immediately (don't wait for DB)
-          activeUsers.delete(userId);
-          userSockets.delete(socket.id);
+          await redis.del(`active:user:${userId}`);
+          await redis.del(`socket:user:${socket.id}`);
         }
 
       } catch (error) {
-        console.error('❌ Error in disconnect handler:', error.message);
+        console.error('Error in disconnect handler:', error.message);
       }
 
-      console.log(`🔌 Socket disconnected: ${socket.id}`);
+      // console.log(`Socket disconnected: ${socket.id}`);
     });
 
     // Handle errors
@@ -1422,25 +1399,137 @@ const initializeSocket = (io) => {
   });
 };
 
-// Helper function to get online users
-const getOnlineUsers = () => {
-  return Array.from(activeUsers.entries()).map(([userId, userData]) => ({
-    user_id: userId,
-    username: userData.username,
-    full_name: userData.full_name,
-    status: userData.status,
-    lastSeen: userData.lastSeen
-  }));
+// Helper function to get online users using SCAN (non-blocking)
+const getOnlineUsers = async () => {
+  let cursor = 0;
+  const result = [];
+
+  do {
+    // SCAN with MATCH pattern and COUNT hint
+    const reply = await redis.scan(cursor, {
+      MATCH: "active:user:*",
+      COUNT: 50
+    });
+
+    cursor = reply.cursor;
+    const keys = reply.keys;
+
+    for (const key of keys) {
+      const userData = await redis.hGetAll(key);
+      if (!userData || Object.keys(userData).length === 0) continue;
+
+      const userId = key.split(":")[2];
+
+      result.push({
+        user_id: parseInt(userId),
+        username: userData.username,
+        full_name: userData.full_name,
+        profile_pic: userData.profile_pic,
+        status: userData.status,
+        lastSeen: userData.lastSeen
+      });
+    }
+  } while (cursor !== 0); // continue until SCAN wraps around
+
+  return result;
 };
+
+
+const cleanupRegistrationBySocket = async (socket) => {
+  const authController = require('../controller/auth.controller');
+  const pendingRegistrations = authController.getPendingRegistrations();
+
+  let cursor = 0;
+
+  do {
+    // scan Redis for keys matching registration:socket:*
+    const reply = await redis.scan(cursor, {
+      MATCH: "registration:socket:*",
+      COUNT: 50
+    });
+
+    cursor = reply.cursor;
+    const keys = reply.keys;
+
+    for (const key of keys) {
+      const storedSocketId = await redis.get(key);
+
+      if (storedSocketId === socket.id) {
+
+        // extract username from key => registration:socket:<username>
+        const parts = key.split(":");
+        const username = parts[2];
+
+        // clear pending registration timeout
+        const registrationData = pendingRegistrations.get(username);
+        if (registrationData) {
+          clearTimeout(registrationData.timeoutId);
+          pendingRegistrations.delete(username);
+        }
+
+        // delete Redis key
+        await redis.del(key);
+
+        return; // done
+      }
+    }
+  } while (cursor !== 0);
+};
+
+const cleanupLoginBySocket = async (socket) => {
+  const authController = require('../controller/auth.controller');
+  const pendingLogins = authController.getPendingLogins();
+
+  let cursor = 0;
+
+  do {
+    // scan Redis for keys matching registration:socket:*
+    const reply = await redis.scan(cursor, {
+      MATCH: "login:socket:*",
+      COUNT: 50
+    });
+
+    cursor = reply.cursor;
+    const keys = reply.keys;
+
+    for (const key of keys) {
+      const storedSocketId = await redis.get(key);
+
+      if (storedSocketId === socket.id) {
+
+        // extract username from key => registration:socket:<username>
+        const parts = key.split(":");
+        const userId = parseInt(parts[2]);
+
+        // clear pending registration timeout
+        const loginData = pendingLogins.get(userId);
+        if (loginData) {
+          clearTimeout(loginData.timeoutId);
+          pendingLogins.delete(userId);
+        }
+
+        // delete Redis key
+        await redis.del(key);
+
+        return; // done
+      }
+    }
+  } while (cursor !== 0);
+};
+
+
+
 
 // Helper function to check if user is online
-const isUserOnline = (userId) => {
-  return activeUsers.has(parseInt(userId));
+const isUserOnline = async (userId) => {
+  const exists = await redis.exists(`active:user:${userId}`);
+  return exists === 1;
 };
 
+
 // Helper function to send notification to specific user
-const sendNotificationToUser = (userId, notification) => {
-  const userData = activeUsers.get(parseInt(userId));
+const sendNotificationToUser = async (userId, notification) => {
+  const userData = await redis.hGetAll(`active:user:${userId}`);
   if (userData && userData.socketId && ioInstance) {
     ioInstance.to(userData.socketId).emit('notification', notification);
     return true;

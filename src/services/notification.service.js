@@ -23,7 +23,6 @@ const sendPushNotificationToUser = async (userId, payload) => {
     });
 
     if (!pushSubscription) {
-      console.log(`⚠️  No push subscription found for user ${userId}`);
       return false;
     }
 
@@ -38,17 +37,15 @@ const sendPushNotificationToUser = async (userId, payload) => {
 
     // Send notification
     await webpush.sendNotification(subscription, JSON.stringify(payload));
-    console.log(`✅ Push notification sent to user ${userId}`);
     return true;
   } catch (error) {
     if (error.statusCode === 410 || error.statusCode === 404) {
       // Subscription is no longer valid, delete it
-      console.log(`🗑️  Subscription expired for user ${userId}, removing...`);
       await prisma.pushSubscription.deleteUnique({
         where: { user_id: userId }
       }).catch(err => console.error('Error deleting subscription:', err));
     } else {
-      console.error(`❌ Failed to send push notification to user ${userId}:`, error.message);
+      console.error(`Failed to send push notification to user ${userId}:`, error.message);
     }
     return false;
   }
@@ -85,6 +82,8 @@ const notifyNewMessage = async (messageData, recipientUserIds) => {
       message_text,
       chat_id,
       chat_name,
+      chat_type,
+      chat_image,
       message_type
     } = messageData;
 
@@ -93,29 +92,79 @@ const notifyNewMessage = async (messageData, recipientUserIds) => {
       ? message_text.substring(0, 50) + '...'
       : (message_text || `[${message_type.toUpperCase()}]`);
 
-    const payload = {
-      title: chat_name || sender_username,
-      body: `${sender_username}: ${truncatedText}`,
-      icon: sender_profile_pic || 'https://via.placeholder.com/192',
-      badge: 'https://via.placeholder.com/72',
-      tag: `message-${chat_id}`,
-      data: {
-        chat_id: chat_id,
-        action: 'open_chat',
-        url: `/chat/${chat_id}`
-      },
-      requireInteraction: false,
-      vibrate: [200, 100, 200],
-      silent: false
-    };
+    let payload;
+    let notificationMessage;
 
-    console.log(`📢 Sending message notification for chat ${chat_id}...`);
+    // Different notification format for private vs group chats
+    if (chat_type === 'private') {
+      // Private chat: sender profile pic, sender name, message
+      payload = {
+        title: sender_username,
+        body: truncatedText,
+        icon: sender_profile_pic || 'https://via.placeholder.com/192',
+        badge: 'https://via.placeholder.com/72',
+        tag: `message-${chat_id}`,
+        data: {
+          chat_id: chat_id,
+          action: 'open_chat',
+          url: `/chat/${chat_id}`,
+          chat_type: 'private'
+        },
+        requireInteraction: false,
+        vibrate: [200, 100, 200],
+        silent: false
+      };
+      notificationMessage = `${sender_username}: ${truncatedText}`;
+    } else {
+      // Group chat: group chat image, group name, sender name, message
+      payload = {
+        title: chat_name || 'Group Chat',
+        body: `${sender_username}: ${truncatedText}`,
+        icon: chat_image || 'https://via.placeholder.com/192',
+        badge: 'https://via.placeholder.com/72',
+        tag: `message-${chat_id}`,
+        data: {
+          chat_id: chat_id,
+          action: 'open_chat',
+          url: `/chat/${chat_id}`,
+          chat_type: 'group'
+        },
+        requireInteraction: false,
+        vibrate: [200, 100, 200],
+        silent: false
+      };
+      notificationMessage = `${chat_name}: ${sender_username} - ${truncatedText}`;
+    }
+
+    // Send push notifications
     const result = await sendPushNotificationToMultipleUsers(recipientUserIds, payload);
-    console.log(`✅ Message notification: ${result.sent} sent, ${result.failed} failed`);
+
+    // Save notifications to database for each recipient
+    try {
+      const notificationPromises = recipientUserIds.map(userId =>
+        prisma.notification.create({
+          data: {
+            user_id: userId,
+            message: notificationMessage,
+            notification_type: 'message',
+            action_url: `/chat/${chat_id}`,
+            is_read: false
+          }
+        }).catch(err => {
+          console.error(`Error saving notification for user ${userId}:`, err.message);
+          return null;
+        })
+      );
+
+      await Promise.all(notificationPromises);
+    } catch (dbError) {
+      console.error('Error saving notifications to database:', dbError);
+      // Don't fail the push notification if DB save fails
+    }
 
     return result;
   } catch (error) {
-    console.error('❌ Error in notifyNewMessage:', error);
+    console.error('Error in notifyNewMessage:', error);
     return { sent: 0, failed: recipientUserIds.length };
   }
 };
@@ -144,11 +193,26 @@ const notifyUserAddedToGroup = async (userId, groupData) => {
       vibrate: [200, 100, 200, 100, 200]
     };
 
-    console.log(`📢 Sending group add notification to user ${userId}...`);
     const result = await sendPushNotificationToUser(userId, payload);
+
+    // Save notification to database
+    try {
+      await prisma.notification.create({
+        data: {
+          user_id: userId,
+          message: `You've been added to "${chat_name}" by ${added_by_username}`,
+          notification_type: 'group_added',
+          action_url: `/chat/${chat_id}`,
+          is_read: false
+        }
+      });
+    } catch (dbError) {
+      console.error(`Error saving group addition notification for user ${userId}:`, dbError.message);
+    }
+
     return result;
   } catch (error) {
-    console.error('❌ Error in notifyUserAddedToGroup:', error);
+    console.error('Error in notifyUserAddedToGroup:', error);
     return false;
   }
 };
@@ -188,11 +252,33 @@ const notifyGroupInfoChange = async (userIds, changeData) => {
       vibrate: [200, 100, 200]
     };
 
-    console.log(`📢 Sending group change notification...`);
     const result = await sendPushNotificationToMultipleUsers(userIds, payload);
+
+    // Save notifications to database for each user
+    try {
+      const notificationPromises = userIds.map(userId =>
+        prisma.notification.create({
+          data: {
+            user_id: userId,
+            message: `${changed_by_username}: ${message}`,
+            notification_type: 'group_info_changed',
+            action_url: `/chat/${chat_id}`,
+            is_read: false
+          }
+        }).catch(err => {
+          console.error(`Error saving group info change notification for user ${userId}:`, err.message);
+          return null;
+        })
+      );
+
+      await Promise.all(notificationPromises);
+    } catch (dbError) {
+      console.error('Error saving group info change notifications to database:', dbError);
+    }
+
     return result;
   } catch (error) {
-    console.error('❌ Error in notifyGroupInfoChange:', error);
+    console.error('Error in notifyGroupInfoChange:', error);
     return { sent: 0, failed: userIds.length };
   }
 };
@@ -223,10 +309,9 @@ const savePushSubscription = async (userId, subscription) => {
       }
     });
 
-    console.log(`✅ Push subscription saved for user ${userId}`);
     return result;
   } catch (error) {
-    console.error('❌ Error saving push subscription:', error);
+    console.error('Error saving push subscription:', error);
     throw error;
   }
 };
@@ -240,15 +325,13 @@ const removePushSubscription = async (userId) => {
     await prisma.pushSubscription.delete({
       where: { user_id: userId }
     });
-    console.log(`✅ Push subscription removed for user ${userId}`);
     return true;
   } catch (error) {
     if (error.code === 'P2025') {
       // Record not found
-      console.log(`⚠️  No subscription to delete for user ${userId}`);
       return false;
     }
-    console.error('❌ Error removing push subscription:', error);
+    console.error('Error removing push subscription:', error);
     throw error;
   }
 };
@@ -283,10 +366,9 @@ const saveNotification = async (userId, notificationData) => {
       }
     });
 
-    console.log(`✅ Notification saved for user ${userId}`);
     return notification;
   } catch (error) {
-    console.error('❌ Error saving notification to DB:', error);
+    console.error('Error saving notification to DB:', error);
     throw error;
   }
 };
