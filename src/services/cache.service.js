@@ -8,8 +8,8 @@ const prisma = new PrismaClient();
  */
 
 const MESSAGE_CACHE_SIZE = 100; // Number of recent messages to cache per chat
-const MESSAGE_TTL = 3600; // 1 hour
-const CHAT_MESSAGES_TTL = 1800; // 30 minutes
+const MESSAGE_TTL = '3600'; // 1 hour
+const CHAT_MESSAGES_TTL = '1800'; // 30 minutes
 
 /**
  * Cache a single message
