@@ -245,7 +245,7 @@ const initializeSocket = (io) => {
     socket.on('monitor_registration', async (data) => {
       const { username } = data;
       if (username) {
-        await redis.set(`registration:socket:${username}`, socket.id, { EX: 300 });
+        await redis.set(`registration:socket:${username}`, String(socket.id), { EX: 300 });
         
         socket.emit('monitoring_started', { username });
       }
@@ -285,7 +285,7 @@ const initializeSocket = (io) => {
     socket.on('monitor_login', async (data) => {
       const { userId } = data;
       if (userId) {
-        await redis.set(`login:socket:${userId}`, socket.id, { EX: 300 });
+        await redis.set(`login:socket:${userId}`, String(socket.id), { EX: 300 });
         
         socket.emit('monitoring_started', { userId });
       }
@@ -358,13 +358,14 @@ const initializeSocket = (io) => {
     const userId = user.user_id;
 
     await redis.hSet(`active:user:${userId}`, {
-      socketId: socket.id,
-      username: user.username || '',
-      full_name: user.full_name || '',
-      profile_pic: user.profile_pic || '',
+      socketId: String(socket.id),
+      username: String(user.username || ''),
+      full_name: String(user.full_name || ''),
+      profile_pic: String(user.profile_pic || ''),
       status: "online",
       lastSeen: new Date().toISOString()
     });
+    
     await redis.expire(`active:user:${userId}`, 86400);
 
     await redis.set(`socket:user:${socket.id}`, String(userId), { EX: 86400 });
@@ -1145,7 +1146,7 @@ const initializeSocket = (io) => {
 
         if (exists) {
           await redis.hSet(key, {
-            status_message: status_message || '',
+            status_message: String(status_message || ''),
             lastSeen: new Date().toISOString()
           });
         }
@@ -1401,7 +1402,7 @@ const initializeSocket = (io) => {
 
 // Helper function to get online users using SCAN (non-blocking)
 const getOnlineUsers = async () => {
-  let cursor = 0;
+  let cursor = '0';  // Redis SCAN cursor must be a string
   const result = [];
 
   do {
@@ -1429,7 +1430,7 @@ const getOnlineUsers = async () => {
         lastSeen: userData.lastSeen
       });
     }
-  } while (cursor !== 0); // continue until SCAN wraps around
+  } while (cursor !== '0'); // continue until SCAN wraps around (cursor is string '0')
 
   return result;
 };
@@ -1439,7 +1440,7 @@ const cleanupRegistrationBySocket = async (socket) => {
   const authController = require('../controller/auth.controller');
   const pendingRegistrations = authController.getPendingRegistrations();
 
-  let cursor = 0;
+  let cursor = '0';  // Redis SCAN cursor must be a string
 
   do {
     // scan Redis for keys matching registration:socket:*
@@ -1473,14 +1474,14 @@ const cleanupRegistrationBySocket = async (socket) => {
         return; // done
       }
     }
-  } while (cursor !== 0);
+  } while (cursor !== '0');  // cursor is string '0'
 };
 
 const cleanupLoginBySocket = async (socket) => {
   const authController = require('../controller/auth.controller');
   const pendingLogins = authController.getPendingLogins();
 
-  let cursor = 0;
+  let cursor = '0';  // Redis SCAN cursor must be a string
 
   do {
     // scan Redis for keys matching registration:socket:*
@@ -1514,7 +1515,7 @@ const cleanupLoginBySocket = async (socket) => {
         return; // done
       }
     }
-  } while (cursor !== 0);
+  } while (cursor !== '0');  // cursor is string '0'
 };
 
 

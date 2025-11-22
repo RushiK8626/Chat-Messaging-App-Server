@@ -8,8 +8,8 @@ const prisma = new PrismaClient();
  */
 
 const MESSAGE_CACHE_SIZE = 100; // Number of recent messages to cache per chat
-const MESSAGE_TTL = '3600'; // 1 hour
-const CHAT_MESSAGES_TTL = '1800'; // 30 minutes
+const MESSAGE_TTL = 3600; // 1 hour
+const CHAT_MESSAGES_TTL = 1800; // 30 minutes
 
 /**
  * Cache a single message
@@ -72,7 +72,7 @@ const cacheRecentMessages = async (chatId, messages) => {
     await Promise.all(messages.map(msg => cacheMessage(msg)));
     
     // Store last update timestamp
-    await redis.set(`chat:messages:updated:${chatId}`, Date.now(), { EX: CHAT_MESSAGES_TTL });
+    await redis.set(`chat:messages:updated:${chatId}`, String(Date.now()), { EX: CHAT_MESSAGES_TTL });
     
     return true;
   } catch (error) {
@@ -140,7 +140,7 @@ const addMessageToCache = async (chatId, message) => {
     await cacheMessage(message);
     
     // Update timestamp
-    await redis.set(`chat:messages:updated:${chatId}`, Date.now(), { EX: CHAT_MESSAGES_TTL });
+    await redis.set(`chat:messages:updated:${chatId}`, String(Date.now()), { EX: CHAT_MESSAGES_TTL });
     
     return true;
   } catch (error) {

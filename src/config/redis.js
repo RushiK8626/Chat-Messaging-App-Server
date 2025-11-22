@@ -45,6 +45,7 @@ const initRedis = async () => {
 
     redisClient.on('error', (err) => {
       console.error('Redis error:', err.message);
+      console.error('Redis error stack:', err.stack);
     });
 
     redisClient.on('connect', () => {

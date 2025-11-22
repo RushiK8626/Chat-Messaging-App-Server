@@ -3,9 +3,9 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
 // TTL configurations (in seconds)
-const USER_PROFILE_TTL = '3600'; // 1 hour
-const CHAT_MEMBERSHIPS_TTL = '1800'; // 30 minutes
-const FRIEND_LIST_TTL = '1800'; // 30 minutes
+const USER_PROFILE_TTL = 3600; // 1 hour
+const CHAT_MEMBERSHIPS_TTL = 1800; // 30 minutes
+const FRIEND_LIST_TTL = 1800; // 30 minutes
 
 /**
  * Cache user profile
