@@ -156,15 +156,6 @@ app.get('/health', async (req, res) => {
 // Initialize socket handler
 initializeSocket(io);
 
-// Initialize Redis
-(async () => {
-  try {
-    await initRedis();
-  } catch (error) {
-    console.error('Warning: Redis not available, some features may be limited');
-  }
-})();
-
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   await closeRedis();
@@ -179,8 +170,9 @@ process.on('SIGINT', async () => {
 // start the server
 const PORT = process.env.PORT || 3001;
 
-// Start server only after DB connection is confirmed
+// Start server only after DB and Redis connections are confirmed
 async function startServer() {
+  // Test database connection
   const dbConnected = await testConnection();
   
   if (!dbConnected) {
@@ -188,6 +180,12 @@ async function startServer() {
     process.exit(1);
   }
   
+  // Initialize Redis (non-blocking - server starts even if Redis fails)
+  initRedis().catch(() => {
+    // Redis initialization will log its own errors, no need for additional warning
+  });
+  
+  // Start HTTP server
   server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
   });
